@@ -1,17 +1,17 @@
-# nvfp4-on-mac
+# Run NVFP4 models on a Mac
 
-*Copyright (c) 2026 the nvfp4-stream authors. SPDX-License-Identifier: Apache-2.0*
-
-NVFP4 is NVIDIA's native 4-bit floating point format, and it's fast becoming a
-shared format across the industry: hardware and software providers alike are
+NVFP4 is an adaptive 4-bit floating point format, and it's fast becoming a
+shared format across the AI community: hardware and software providers alike are
 adopting and supporting it because it gets the best compression with the best
 quality, thanks to adaptive per-block scaling. Nemotron 3 Super 120B is the
 first model in the Nemotron 3 family pretrained natively in NVFP4, rather than
-quantized down after the fact. I wanted to see it run on a Mac, with the real
-NVFP4 weights, no requantizing, no GGUF conversion. This repo streams the
-original `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` ModelOpt checkpoint
-straight off disk on Apple Silicon. If you want to see NVFP4 running on a GPU
-instead, including for free on the T4 tier, see
+quantized down after the fact. I wanted to see it run on a Mac, with NVFP4 
+weights, without no requantizing, GGUF conversion or other preprocessing -- 
+because that means you can run any NVFP4 model (subject to operator support) 
+on your Mac. nvfp4-stream runs the original 
+`nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` ModelOpt checkpoint
+straight off disk on your Apple Silicon Mac. If you want to see NVFP4 running 
+on a GPU instead, including for free on the Colab T4 tier, see
 [nvfp4-on-turing](https://github.com/mikekg/nvfp4-on-turing) for a Google Colab
 version.
 
@@ -29,12 +29,11 @@ requantized. It runs on a patched MLX Metal kernel that adds per-expert NVFP4
 install` builds MLX from that PR commit, not from a release, since the
 required kernel isn't in one yet.
 
-It's named `nvfp4-stream`, not `nemotron-nvfp4-stream`, on purpose: the
-Nemotron-H family is the first target, not the only intended one. Today
-`index.py` hard-checks `model_type == "nemotron_h"` and its tensor paths are
-Nemotron-H's own naming, so it does not read other architectures yet.
-Extending it to other NVFP4 checkpoint layouts is future work, not a claim
-about what it does now.
+The Nemotron-H family is the first target, not the only intended one and adding
+support for other models should be straightforward: Today, `index.py` hard-checks 
+`model_type == "nemotron_h"` and its tensor paths are Nemotron-H's own naming, so 
+it does not read other architectures yet.  Extending it to other NVFP4 checkpoint 
+layouts should be straightforward, though.
 
 ## Prerequisites
 
