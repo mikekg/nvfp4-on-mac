@@ -1,0 +1,26 @@
+diff --git a/mlx_lm/generate.py b/mlx_lm/generate.py
+index e65016c..2415d50 100644
+--- a/mlx_lm/generate.py
++++ b/mlx_lm/generate.py
+@@ -456,7 +456,8 @@ def generate_step(
+ 
+         n = 0
+         while True:
+-            if n != max_tokens:
++            has_next = max_tokens < 0 or n + 1 < max_tokens
++            if has_next:
+                 next_y, next_logprobs = _step(y)
+                 mx.async_eval(next_y, next_logprobs)
+             if n == 0:
+@@ -467,8 +468,10 @@ def generate_step(
+             yield y.item(), logprobs
+             if n % 256 == 0:
+                 mx.clear_cache()
+-            y, logprobs = next_y, next_logprobs
+             n += 1
++            if not has_next:
++                break
++            y, logprobs = next_y, next_logprobs
+ 
+ 
+ def speculative_generate_step(
