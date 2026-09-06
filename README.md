@@ -52,7 +52,7 @@ make all
 ```
 
 By default this runs Nemotron 3 Super 120B. `MODEL_ID` is an overridable
-variable, so a smaller model works the same way:
+variable, so another NVFP4 checkpoint works the same way:
 
 ```sh
 MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 make all
@@ -76,6 +76,29 @@ make cpu-bench     # 500-token essay, CPU-only backend
 
 Both print the run's stats block (tokens/sec, peak memory, load time) after
 generation.
+
+## Calling the CLI directly
+
+The Makefile targets are thin wrappers around one command,
+`nemotron-nvfp4-stream`. There's no separate benchmark mode — every run
+streams generated text to stdout as it's produced, then prints a JSON stats
+block (prompt/generation tok/sec, peak memory, load and total time) once
+generation finishes:
+
+```sh
+.venv/bin/nemotron-nvfp4-stream \
+  --model models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+  --device metal \
+  --expert-budget-gib 8 \
+  --prompt "Write a 500-word essay about the beauty of Austria and its capital city." \
+  --max-tokens 500
+```
+
+Other flags: `--device {metal,cpu}`, `--max-tokens`, `--expert-budget-gib`
+(how much unified memory to give the expert cache), `--workers`, `--temp`,
+`--top-p`, `--output <file>` (also save the generated text), `--raw-prompt`
+(skip the chat template), `--trust-remote-code`, and `--check-only` (validate
+the checkpoint's expert tensors without loading or generating anything).
 
 ## Makefile targets
 
