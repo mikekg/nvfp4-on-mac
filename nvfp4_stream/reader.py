@@ -1,3 +1,6 @@
+# Copyright (c) 2026 the nvfp4-stream authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Coalesced pread of individual ModelOpt expert tensors."""
 
 from __future__ import annotations

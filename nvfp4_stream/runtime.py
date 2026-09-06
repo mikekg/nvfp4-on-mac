@@ -1,3 +1,6 @@
+# Copyright (c) 2026 the nvfp4-stream authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Nemotron-H loader with SSD-paged routed experts."""
 
 from __future__ import annotations

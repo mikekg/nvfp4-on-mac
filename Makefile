@@ -6,7 +6,7 @@ MODEL_DIR  := models/$(notdir $(MODEL_ID))
 VENV       := .venv
 PY         := $(VENV)/bin/python3
 PIP        := $(VENV)/bin/pip
-RUN        := $(VENV)/bin/nemotron-nvfp4-stream
+RUN        := $(VENV)/bin/nvfp4-stream
 
 MLX_LM_DIR := mlx-lm
 EXPERT_BUDGET_GIB := 8
@@ -64,7 +64,7 @@ metal-bench: install patch
 
 cpu-bench: install patch
 	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
-		--device cpu --prompt "$(PROMPT_ESSAY)" --max-tokens 500
+		--device cpu --prompt "$(PROMPT_TEST)" --max-tokens 50
 
 all: install patch test metal-bench cpu-bench
 

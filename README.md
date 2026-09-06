@@ -1,5 +1,7 @@
 # nvfp4-on-mac
 
+*Copyright (c) 2026 the nvfp4-stream authors. SPDX-License-Identifier: Apache-2.0*
+
 NVFP4 is NVIDIA's native 4-bit floating point format, and it's fast becoming a
 shared format across the industry: hardware and software providers alike are
 adopting and supporting it because it gets the best compression with the best
@@ -15,15 +17,24 @@ version.
 
 ## What this is
 
-`nemotron_nvfp4_stream` is a narrow adapter for one checkpoint layout: it
-reads Nemotron 3 Super's NVFP4 ModelOpt shards directly from the source
-safetensors files, decoding routed experts on demand instead of holding the
-full 59 GB of expert weights resident. No model file is rewritten, no weight
-is requantized. It runs on a patched MLX Metal kernel that adds per-expert
-NVFP4 `global_scale` support, from an as-yet-unmerged MLX pull request
+`nvfp4_stream` is an adapter for the Nemotron-H checkpoint layout (`model_type:
+nemotron_h` in `config.json`) — it isn't restricted to one specific model
+size, but it is restricted to that architecture family. It reads a model's
+NVFP4 ModelOpt shards directly from the source safetensors files, decoding
+routed experts on demand instead of holding the full expert weight set
+resident (59 GB for Super 120B). No model file is rewritten, no weight is
+requantized. It runs on a patched MLX Metal kernel that adds per-expert NVFP4
+`global_scale` support, from an as-yet-unmerged MLX pull request
 ([ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458)) — `make
 install` builds MLX from that PR commit, not from a release, since the
 required kernel isn't in one yet.
+
+It's named `nvfp4-stream`, not `nemotron-nvfp4-stream`, on purpose: the
+Nemotron-H family is the first target, not the only intended one. Today
+`index.py` hard-checks `model_type == "nemotron_h"` and its tensor paths are
+Nemotron-H's own naming, so it does not read other architectures yet.
+Extending it to other NVFP4 checkpoint layouts is future work, not a claim
+about what it does now.
 
 ## Prerequisites
 
@@ -71,7 +82,8 @@ To run the benchmarks on their own:
 
 ```sh
 make metal-bench   # 500-token essay, Metal (GPU) backend
-make cpu-bench     # 500-token essay, CPU-only backend
+make cpu-bench     # short capital-of-Austria prompt, CPU-only backend (CPU
+                   # dequant is slow enough that a 500-token essay isn't practical)
 ```
 
 Both print the run's stats block (tokens/sec, peak memory, load time) after
@@ -80,13 +92,13 @@ generation.
 ## Calling the CLI directly
 
 The Makefile targets are thin wrappers around one command,
-`nemotron-nvfp4-stream`. There's no separate benchmark mode — every run
+`nvfp4-stream`. There's no separate benchmark mode — every run
 streams generated text to stdout as it's produced, then prints a JSON stats
 block (prompt/generation tok/sec, peak memory, load and total time) once
 generation finishes:
 
 ```sh
-.venv/bin/nemotron-nvfp4-stream \
+.venv/bin/nvfp4-stream \
   --model models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
   --device metal \
   --expert-budget-gib 8 \
@@ -94,11 +106,21 @@ generation finishes:
   --max-tokens 500
 ```
 
-Other flags: `--device {metal,cpu}`, `--max-tokens`, `--expert-budget-gib`
-(how much unified memory to give the expert cache), `--workers`, `--temp`,
-`--top-p`, `--output <file>` (also save the generated text), `--raw-prompt`
-(skip the chat template), `--trust-remote-code`, and `--check-only` (validate
-the checkpoint's expert tensors without loading or generating anything).
+Key options:
+
+| Flag | Does |
+|---|---|
+| `--model` | Local checkpoint directory (required) |
+| `--device {metal,cpu}` | Run on the Metal GPU backend or CPU-only |
+| `--prompt` | The user message |
+| `--max-tokens` | How many tokens to generate |
+| `--expert-budget-gib` | Unified memory given to the resident expert cache |
+| `--workers` | Parallel readers for streaming expert weights off disk |
+| `--temp`, `--top-p` | Sampling parameters |
+| `--output <file>` | Also write the generated text to a file |
+| `--raw-prompt` | Skip the chat template, send the prompt as-is |
+| `--trust-remote-code` | Needed for the model's custom `modeling_nemotron_h.py` |
+| `--check-only` | Validate the checkpoint's expert tensors without loading or generating anything |
 
 ## Makefile targets
 
@@ -109,6 +131,6 @@ the checkpoint's expert tensors without loading or generating anything).
 | `make patch` | Applies the mlx-lm patches this adapter needs |
 | `make test` | Asks the model for the capital of Austria |
 | `make metal-bench` | Times a 500-token essay on Metal |
-| `make cpu-bench` | Times the same essay CPU-only |
+| `make cpu-bench` | Times the short capital-of-Austria prompt CPU-only |
 | `make all` | Runs all of the above in order |
 | `make clean` | Removes the venv |
