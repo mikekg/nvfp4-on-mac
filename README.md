@@ -51,6 +51,17 @@ cd nvfp4-on-mac
 make all
 ```
 
+By default this runs Nemotron 3 Super 120B. `MODEL_ID` is an overridable
+variable, so a smaller model works the same way:
+
+```sh
+MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 make all
+```
+
+Nano 30B is also `model_type: nemotron_h`, so the adapter reads its expert
+layout the same way it reads Super's. It has not been run end to end through
+this adapter yet — Super 120B is the one these benchmarks are from.
+
 `make all` downloads the 80 GB checkpoint, builds the patched MLX and
 installs the adapter, applies the mlx-lm patches this needs, asks the model
 for the capital of Austria as a sanity check, then runs the two benchmarks
