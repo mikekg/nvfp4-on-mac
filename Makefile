@@ -10,26 +10,19 @@ RUN        := $(VENV)/bin/nvfp4-stream
 
 MLX_LM_DIR := mlx-lm
 EXPERT_BUDGET_GIB := 8
-
-# ml-explore/mlx#4458 adds the per-expert NVFP4 global_scale support that
-# gather_qmm needs for this model. It is not in any mlx release yet, so we
-# build it from the PR commit instead of `pip install mlx`.
-MLX_PR_SHA := 285ab899087ecfbae9390c1e96b1571f86a5ef8a
+RERUN_COMPILED ?= 2
+RERUN_INTERPRETED ?= 2
 
 PROMPT_TEST  := What is the capital of Austria?
 PROMPT_ESSAY := Write a 500-word essay about the beauty of Austria and its capital city.
 
-.PHONY: download model install patch test all metal-bench cpu-bench clean
+.PHONY: download model install patch test test-compile run run-compile all metal-bench cpu-bench clean
 
 # `download` is the real fetch step; `model` is an alias so `make model`
 # and `make download` both do the same thing.
 download: $(VENV)/bin/python3
 	@mkdir -p $(dir $(MODEL_DIR))
-	@if [ -f "$(MODEL_DIR)/model.safetensors.index.json" ]; then \
-		echo "Checkpoint already present at $(MODEL_DIR), skipping download."; \
-	else \
-		HF_HUB_ENABLE_HF_TRANSFER=0 $(VENV)/bin/hf download $(MODEL_ID) --local-dir $(MODEL_DIR); \
-	fi
+	$(VENV)/bin/hf download $(MODEL_ID) --local-dir $(MODEL_DIR)
 
 model: download
 
@@ -42,8 +35,8 @@ install: $(VENV)/bin/python3 download
 		git clone https://github.com/ml-explore/mlx-lm.git $(MLX_LM_DIR); \
 	fi
 	$(PIP) install -q -e $(MLX_LM_DIR) --no-deps
-	@echo "Building MLX from ml-explore/mlx#4458 (not in any release yet, this takes a few minutes)..."
-	$(PIP) install -q "git+https://github.com/ml-explore/mlx.git@$(MLX_PR_SHA)"
+	@echo "Building MLX main with per-expert NVFP4 global_scale support (this takes a few minutes)..."
+	$(PIP) install -q "git+https://github.com/ml-explore/mlx.git@main"
 	$(PIP) install -q -e . --no-deps
 
 patch:
@@ -57,6 +50,24 @@ patch:
 test: install patch
 	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
 		--device metal --prompt "$(PROMPT_TEST)" --max-tokens 50
+
+test-compile: install patch
+	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
+		--device metal --compile --prompt "$(PROMPT_TEST)" --max-tokens 50
+
+run: install patch
+	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
+		--device metal --quiet-inference --expert-stats \
+		--runs $(RERUN_INTERPRETED) \
+		--stats-output interpreted-runs.json \
+		--prompt "$(PROMPT_ESSAY)" --max-tokens 500
+
+run-compile: install patch
+	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
+		--device metal --compile --quiet-inference --expert-stats \
+		--runs $(RERUN_COMPILED) \
+		--stats-output compile-runs.json \
+		--prompt "$(PROMPT_ESSAY)" --max-tokens 500
 
 metal-bench: install patch
 	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \

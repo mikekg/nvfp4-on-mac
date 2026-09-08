@@ -9,7 +9,8 @@ quantized down after the fact. I wanted to see it run on a Mac, with NVFP4
 weights, without no requantizing, GGUF conversion or other preprocessing -- 
 because that means you can run any NVFP4 model (subject to operator support) 
 on your Mac. nvfp4-stream runs the original 
-`nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` ModelOpt checkpoint
+`nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` NVFP4 checkpoint in the
+ModelOpt layout
 straight off disk on your Apple Silicon Mac. If you want to see NVFP4 running 
 on a GPU instead, including for free on the Colab T4 tier, see
 [nvfp4-on-turing](https://github.com/mikekg/nvfp4-on-turing) for a Google Colab
@@ -20,14 +21,15 @@ version.
 `nvfp4_stream` is an adapter for the Nemotron-H checkpoint layout (`model_type:
 nemotron_h` in `config.json`) — it isn't restricted to one specific model
 size, but it is restricted to that architecture family. It reads a model's
-NVFP4 ModelOpt shards directly from the source safetensors files, decoding
-routed experts on demand instead of holding the full expert weight set
-resident (59 GB for Super 120B). No model file is rewritten, no weight is
-requantized. It runs on a patched MLX Metal kernel that adds per-expert NVFP4
-`global_scale` support, from an as-yet-unmerged MLX pull request
-([ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458)) — `make
-install` builds MLX from that PR commit, not from a release, since the
-required kernel isn't in one yet.
+NVFP4 shards in the ModelOpt layout directly from the source safetensors files.
+When the checkpoint fits in unified memory, all experts are loaded before
+generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
+of routed experts). No model file is rewritten, no weight is requantized. It
+runs on the MLX Metal kernel's per-expert NVFP4 `global_scale` support from
+[ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458). `make
+install` builds current MLX `main` until the required kernel appears
+in a release. See [DESIGN.md](DESIGN.md) for the loader, resident mode, and
+streaming expert-cache design.
 
 The Nemotron-H family is the first target, not the only intended one and adding
 support for other models should be straightforward: Today, `index.py` hard-checks 
@@ -51,7 +53,8 @@ layouts should be straightforward, though.
   brew install make
   ```
 - Python 3.10+
-- ~80 GB free disk for the checkpoint, ~25 GB free unified memory to run it
+- Free disk for the selected checkpoint (~19 GB for Nano, ~80 GB for Super)
+- ~25 GB free unified memory to run it
 
 ## Install and run
 
@@ -69,10 +72,10 @@ MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 make all
 ```
 
 Nano 30B is also `model_type: nemotron_h`, so the adapter reads its expert
-layout the same way it reads Super's. It has not been run end to end through
-this adapter yet — Super 120B is the one these benchmarks are from.
+layout the same way it reads Super's. On the tested 36 GB M3 Pro it runs fully
+resident, using 20.07 GB peak memory and generating at 32.78 tokens/second.
 
-`make all` downloads the 80 GB checkpoint, builds the patched MLX and
+`make all` downloads the selected checkpoint, builds MLX and
 installs the adapter, applies the mlx-lm patches this needs, asks the model
 for the capital of Austria as a sanity check, then runs the two benchmarks
 below.
@@ -91,10 +94,9 @@ generation.
 ## Calling the CLI directly
 
 The Makefile targets are thin wrappers around one command,
-`nvfp4-stream`. There's no separate benchmark mode — every run
-streams generated text to stdout as it's produced, then prints a JSON stats
-block (prompt/generation tok/sec, peak memory, load and total time) once
-generation finishes:
+`nvfp4-stream`. There's no separate benchmark mode. Every run streams
+generated text to stdout as it's produced, then prints a JSON stats block
+(prompt/generation tok/sec, peak memory, load and total time):
 
 ```sh
 .venv/bin/nvfp4-stream \
@@ -105,31 +107,46 @@ generation finishes:
   --max-tokens 500
 ```
 
-Key options:
+Options:
 
 | Flag | Does |
 |---|---|
-| `--model` | Local checkpoint directory (required) |
-| `--device {metal,cpu}` | Run on the Metal GPU backend or CPU-only |
-| `--prompt` | The user message |
-| `--max-tokens` | How many tokens to generate |
-| `--expert-budget-gib` | Unified memory given to the resident expert cache |
-| `--workers` | Parallel readers for streaming expert weights off disk |
-| `--temp`, `--top-p` | Sampling parameters |
-| `--output <file>` | Also write the generated text to a file |
-| `--raw-prompt` | Skip the chat template, send the prompt as-is |
-| `--trust-remote-code` | Needed for the model's custom `modeling_nemotron_h.py` |
-| `--check-only` | Validate the checkpoint's expert tensors without loading or generating anything |
+| `-h`, `--help` | Show CLI help and exit |
+| `--model DIR` | Local Hugging Face checkpoint directory (required) |
+| `--prompt TEXT` | User message; default `Hello` |
+| `--output FILE` | Write generated text; multiple runs add `-runN` to the name |
+| `--stats-output FILE` | Write all run metrics as one JSON list |
+| `--quiet-inference` | Suppress generated text but still print statistics |
+| `--expert-stats` | Add per-run expert-cache cold/capacity misses and residency |
+| `--max-tokens N` | Maximum generated tokens per run; default `1` |
+| `--prefill-chunk N` | Tokens per prefill step; defaults to `2048` resident or slots divided by top-K streaming |
+| `--expert-budget-gib GIB` | Total streaming expert-cache budget; default `8` GiB |
+| `--expert-mode {auto,resident,stream}` | Select full residency, SSD streaming, or automatic memory-based selection |
+| `--workers N` | Parallel checkpoint readers; default `6` |
+| `--device {metal,cpu}` | MLX device; default `metal` |
+| `--temp FLOAT` | Sampling temperature; default `0` |
+| `--top-p FLOAT` | Nucleus-sampling probability; default `1` |
+| `--raw-prompt` | Bypass the checkpoint chat template |
+| `--trust-remote-code` | Allow Hugging Face remote code while loading |
+| `--check-only` | Validate and summarize the checkpoint without loading the model |
+| `--mlx-cache-gib GIB` | MLX cache limit; default `0.5` GiB |
+| `--compile` | Compile NVFP4 expert compute with MLX |
+| `--runs N` | Sequential runs sharing one loaded model and expert cache; default `1` |
 
 ## Makefile targets
 
 | Target | Does |
 |---|---|
 | `make download` / `make model` | Downloads the NVFP4 checkpoint from Hugging Face |
-| `make install` | Creates a venv, builds patched MLX from the PR commit, installs mlx-lm and this adapter |
+| `make install` | Creates a venv, builds MLX main, and installs mlx-lm and this adapter |
 | `make patch` | Applies the mlx-lm patches this adapter needs |
 | `make test` | Asks the model for the capital of Austria |
+| `make test-compile` | Runs the same test with MLX compilation |
+| `make run` | Runs the interpreted Metal essay `RERUN_INTERPRETED` times and writes the metrics to `interpreted-runs.json` |
+| `make run-compile` | Runs the compiled Metal essay `RERUN_COMPILED` times and writes the metrics to `compile-runs.json` |
 | `make metal-bench` | Times a 500-token essay on Metal |
 | `make cpu-bench` | Times the short capital-of-Austria prompt CPU-only |
 | `make all` | Runs all of the above in order |
 | `make clean` | Removes the venv |
+
+Override the rerun counts with `RERUN_INTERPRETED` and `RERUN_COMPILED`.
