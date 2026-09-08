@@ -27,8 +27,9 @@ generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
 of routed experts). No model file is rewritten, no weight is requantized. It
 runs on the MLX Metal kernel's per-expert NVFP4 `global_scale` support from
 [ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458). `make
-install` builds MLX from that merge commit until the required kernel appears
-in a release.
+install` builds current MLX `main` until the required kernel appears
+in a release. See [DESIGN.md](DESIGN.md) for the loader, resident mode, and
+streaming expert-cache design.
 
 The Nemotron-H family is the first target, not the only intended one and adding
 support for other models should be straightforward: Today, `index.py` hard-checks 
@@ -106,35 +107,38 @@ generated text to stdout as it's produced, then prints a JSON stats block
   --max-tokens 500
 ```
 
-Key options:
+Options:
 
 | Flag | Does |
 |---|---|
-| `--model` | Local checkpoint directory (required) |
-| `--device {metal,cpu}` | Run on the Metal GPU backend or CPU-only |
-| `--prompt` | The user message |
-| `--max-tokens` | How many tokens to generate |
-| `--prefill-chunk` | Prompt tokens per prefill forward; defaults to 2048 resident or expert slots divided by top-K when streaming |
-| `--expert-mode {auto,resident,stream}` | Load every expert, stream experts, or choose from checkpoint and memory size |
+| `-h`, `--help` | Show CLI help and exit |
+| `--model DIR` | Local Hugging Face checkpoint directory (required) |
+| `--prompt TEXT` | User message; default `Hello` |
+| `--output FILE` | Write generated text; multiple runs add `-runN` to the name |
+| `--stats-output FILE` | Write all run metrics as one JSON list |
+| `--quiet-inference` | Suppress generated text but still print statistics |
+| `--expert-stats` | Add per-run expert-cache cold/capacity misses and residency |
+| `--max-tokens N` | Maximum generated tokens per run; default `1` |
+| `--prefill-chunk N` | Tokens per prefill step; defaults to `2048` resident or slots divided by top-K streaming |
+| `--expert-budget-gib GIB` | Total streaming expert-cache budget; default `8` GiB |
+| `--expert-mode {auto,resident,stream}` | Select full residency, SSD streaming, or automatic memory-based selection |
+| `--workers N` | Parallel checkpoint readers; default `6` |
+| `--device {metal,cpu}` | MLX device; default `metal` |
+| `--temp FLOAT` | Sampling temperature; default `0` |
+| `--top-p FLOAT` | Nucleus-sampling probability; default `1` |
+| `--raw-prompt` | Bypass the checkpoint chat template |
+| `--trust-remote-code` | Allow Hugging Face remote code while loading |
+| `--check-only` | Validate and summarize the checkpoint without loading the model |
+| `--mlx-cache-gib GIB` | MLX cache limit; default `0.5` GiB |
 | `--compile` | Compile NVFP4 expert compute with MLX |
-| `--runs` | Number of in-process inference runs |
-| `--stats-output <file>` | Write every run's metrics as one JSON list |
-| `--quiet-inference` | Suppress generated text while retaining statistics |
-| `--expert-stats` | Add per-run expert-cache cold/capacity misses and residency to the JSON statistics |
-| `--expert-budget-gib` | Unified memory given to the expert cache in stream mode |
-| `--workers` | Parallel checkpoint readers for resident preload and streamed cache fills |
-| `--temp`, `--top-p` | Sampling parameters |
-| `--output <file>` | Also write the generated text to a file |
-| `--raw-prompt` | Skip the chat template, send the prompt as-is |
-| `--trust-remote-code` | Needed for the model's custom `modeling_nemotron_h.py` |
-| `--check-only` | Validate the checkpoint's expert tensors without loading or generating anything |
+| `--runs N` | Sequential runs sharing one loaded model and expert cache; default `1` |
 
 ## Makefile targets
 
 | Target | Does |
 |---|---|
 | `make download` / `make model` | Downloads the NVFP4 checkpoint from Hugging Face |
-| `make install` | Creates a venv, builds MLX from the #4458 merge commit, and installs mlx-lm and this adapter |
+| `make install` | Creates a venv, builds MLX main, and installs mlx-lm and this adapter |
 | `make patch` | Applies the mlx-lm patches this adapter needs |
 | `make test` | Asks the model for the capital of Austria |
 | `make test-compile` | Runs the same test with MLX compilation |
