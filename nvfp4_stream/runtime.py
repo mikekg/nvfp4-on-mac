@@ -447,7 +447,10 @@ def load_streaming_model(
             nemotron_h.Model.sanitize = _resident_sanitizer(pools)
             try:
                 model, tokenizer = load(
-                    str(model_dir), lazy=True, trust_remote_code=trust_remote_code
+                    str(model_dir),
+                    lazy=True,
+                    trust_remote_code=trust_remote_code,
+                    model_config={"num_hidden_layers": index.num_layers},
                 )
             finally:
                 nemotron_h.Model.sanitize = previous

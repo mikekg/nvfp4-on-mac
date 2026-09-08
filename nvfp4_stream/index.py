@@ -104,6 +104,7 @@ class ModelOptIndex:
         )
         if not pattern:
             raise ValueError("config has no layer pattern")
+        self.num_layers = len(pattern)
         self.moe_layers = tuple(
             i for i, kind in enumerate(pattern) if kind in ("E", "moe")
         )

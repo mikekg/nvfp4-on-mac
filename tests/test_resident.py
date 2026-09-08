@@ -213,7 +213,7 @@ def run(device) -> None:
             {"backbone.layers.0.norm.weight": mx.ones((1,))},
         )
         dense_index = ModelOptIndex(dense_path)
-        assert dense_index.moe_layers == ()
+        assert dense_index.num_layers == 1 and dense_index.moe_layers == ()
         assert dense_index.num_experts == dense_index.top_k == 0
         assert dense_index.validate_experts()["bytes_per_slot_set"] == 0
 

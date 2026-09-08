@@ -2,11 +2,11 @@
 
 ## Why expert streaming works
 
-Nemotron-H checkpoints can contain dense layers, mixture-of-experts (MoE)
-layers, or both. In an MoE model, most of the weight bytes are in expert
-feed-forward networks. Each MoE layer has many experts, but a router selects
-only the top-K experts needed for each token. The other experts do no work for
-that token.
+Nemotron-H checkpoints combine Mamba and attention sequence-mixing layers with
+dense or mixture-of-experts (MoE) feed-forward layers. In an MoE model, most
+of the weight bytes are in expert feed-forward networks. Each MoE layer has
+many experts, but a router selects only the top-K experts needed for each
+token. The other experts do no work for that token.
 
 This divides the model into two kinds of data:
 
@@ -100,9 +100,8 @@ For checkpoints with routed experts, `--expert-mode resident` and
 
 A checkpoint with no `E` layers has no routed experts to cache or stream. All
 weights are loaded into unified memory, so the runtime reports resident mode
-and builds no `ExpertPool` objects. Static NVFP4 linears use the same packed
-NVFP4 computation as common weights in MoE checkpoints, while excluded BF16
-weights retain their checkpoint dtype.
+and builds no `ExpertPool` objects. The loader keeps NVFP4 weights packed,
+converts FP8 weights to BF16, and leaves BF16 weights unchanged.
 
 Expert-cache budgets, workers, and statistics have no work to perform for a
 dense-only checkpoint. `--compile` currently compiles only routed-expert
