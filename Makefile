@@ -10,6 +10,8 @@ RUN        := $(VENV)/bin/nvfp4-stream
 
 MLX_LM_DIR := mlx-lm
 EXPERT_BUDGET_GIB := 8
+RERUN_COMPILED ?= 2
+RERUN_INTERPRETED ?= 2
 
 # ml-explore/mlx#4458 adds the per-expert NVFP4 global_scale support that
 # gather_qmm needs for this model. Build its merge commit until a release
@@ -19,7 +21,7 @@ MLX_SHA := cbb4059d8c6652d1c2cce98c348a8a689eb275b8
 PROMPT_TEST  := What is the capital of Austria?
 PROMPT_ESSAY := Write a 500-word essay about the beauty of Austria and its capital city.
 
-.PHONY: download model install patch test all metal-bench cpu-bench clean
+.PHONY: download model install patch test test-compile run run-compile all metal-bench cpu-bench clean
 
 # `download` is the real fetch step; `model` is an alias so `make model`
 # and `make download` both do the same thing.
@@ -53,6 +55,24 @@ patch:
 test: install patch
 	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
 		--device metal --prompt "$(PROMPT_TEST)" --max-tokens 50
+
+test-compile: install patch
+	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
+		--device metal --compile --prompt "$(PROMPT_TEST)" --max-tokens 50
+
+run: install patch
+	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
+		--device metal --quiet-inference --expert-stats \
+		--runs $(RERUN_INTERPRETED) \
+		--stats-output interpreted-runs.json \
+		--prompt "$(PROMPT_ESSAY)" --max-tokens 500
+
+run-compile: install patch
+	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
+		--device metal --compile --quiet-inference --expert-stats \
+		--runs $(RERUN_COMPILED) \
+		--stats-output compile-runs.json \
+		--prompt "$(PROMPT_ESSAY)" --max-tokens 500
 
 metal-bench: install patch
 	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \

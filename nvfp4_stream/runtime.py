@@ -37,7 +37,14 @@ def select_expert_mode(
 class ExpertPool:
     """Fixed per-layer slots with protected-step LRU replacement."""
 
-    def __init__(self, index: ModelOptIndex, reader: ExpertReader, layer: int, slots: int):
+    def __init__(
+        self,
+        index: ModelOptIndex,
+        reader: ExpertReader,
+        layer: int,
+        slots: int,
+        expert_stats: bool = False,
+    ):
         import mlx.core as mx
 
         self.index = index
@@ -48,7 +55,11 @@ class ExpertPool:
         self.free = list(range(slots - 1, -1, -1))
         self.slot_table = np.full(index.num_experts, -1, dtype=np.int32)
         self.fully_resident = False
+        self.expert_stats = expert_stats
         self.hits = self.misses = self.evictions = 0
+        self.cold_misses = self.capacity_misses = 0
+        self._run_accessed_experts: set[int] = set()
+        self._seen_experts: set[int] = set()
         self.input_global_scales: dict[str, np.float32] = {}
         self.input_global_scale_arrays = {}
 
@@ -64,6 +75,11 @@ class ExpertPool:
                 ),
                 "global_scale": mx.ones((slots,), dtype=mx.float32),
             }
+
+    def reset_stats(self) -> None:
+        self.hits = self.misses = self.evictions = 0
+        self.cold_misses = self.capacity_misses = 0
+        self._run_accessed_experts.clear()
 
     def evaluate(self) -> None:
         import mlx.core as mx
@@ -101,6 +117,8 @@ class ExpertPool:
         return slot
 
     def ensure(self, experts: list[int]) -> None:
+        if self.expert_stats:
+            self._run_accessed_experts.update(experts)
         wanted = set(experts)
         missing = []
         for expert in experts:
@@ -109,6 +127,12 @@ class ExpertPool:
                 self.hits += 1
             else:
                 self.misses += 1
+                if self.expert_stats:
+                    if expert in self._seen_experts:
+                        self.capacity_misses += 1
+                    else:
+                        self.cold_misses += 1
+                        self._seen_experts.add(expert)
                 self._allocate(expert, wanted)
                 missing.append(expert)
         if not missing:
@@ -376,6 +400,7 @@ def load_streaming_model(
     expert_mode: str = "auto",
     workers: int = 6,
     trust_remote_code: bool = False,
+    expert_stats: bool = False,
 ):
     """Load resident weights and install direct-from-source expert pools."""
     import mlx.core as mx
@@ -410,7 +435,9 @@ def load_streaming_model(
     reader = ExpertReader(index, workers=workers)
     try:
         pools = {
-            layer: ExpertPool(index, reader, layer, slots)
+            layer: ExpertPool(
+                index, reader, layer, slots, expert_stats=expert_stats
+            )
             for layer in index.moe_layers
         }
         with _SANITIZER_LOCK:
@@ -446,13 +473,14 @@ def streaming_model(*args, **kwargs):
         reader.close()
 
 
-def aggregate_stats(pools: dict[int, ExpertPool], reader: ExpertReader) -> dict:
-    return {
-        "expert_mode": (
-            "resident"
-            if all(pool.fully_resident for pool in pools.values())
-            else "stream"
-        ),
+def aggregate_stats(
+    pools: dict[int, ExpertPool], reader: ExpertReader, expert_stats: bool = False
+) -> dict:
+    expert_mode = (
+        "resident" if all(pool.fully_resident for pool in pools.values()) else "stream"
+    )
+    stats = {
+        "expert_mode": expert_mode,
         "hits": sum(pool.hits for pool in pools.values()),
         "misses": sum(pool.misses for pool in pools.values()),
         "evictions": sum(pool.evictions for pool in pools.values()),
@@ -460,3 +488,14 @@ def aggregate_stats(pools: dict[int, ExpertPool], reader: ExpertReader) -> dict:
         "useful_bytes": reader.useful_bytes,
         "reads": reader.reads,
     }
+    if expert_stats:
+        stats.update(
+            experts_loaded=sum(len(pool.id_to_slot) for pool in pools.values()),
+            cold_misses=sum(pool.cold_misses for pool in pools.values()),
+            capacity_misses=sum(pool.capacity_misses for pool in pools.values()),
+        )
+        if expert_mode == "stream":
+            stats["unique_experts_accessed"] = sum(
+                len(pool._run_accessed_experts) for pool in pools.values()
+            )
+    return stats

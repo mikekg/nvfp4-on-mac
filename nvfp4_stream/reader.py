@@ -32,6 +32,9 @@ class ExpertReader:
         self.useful_bytes = 0
         self.reads = 0
 
+    def reset_stats(self) -> None:
+        self.bytes_read = self.useful_bytes = self.reads = 0
+
     def _fd(self, path: str) -> int:
         with self._fd_lock:
             if path not in self._fds:

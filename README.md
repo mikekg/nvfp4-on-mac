@@ -93,10 +93,9 @@ generation.
 ## Calling the CLI directly
 
 The Makefile targets are thin wrappers around one command,
-`nvfp4-stream`. There's no separate benchmark mode — every run
-streams generated text to stdout as it's produced, then prints a JSON stats
-block (prompt/generation tok/sec, peak memory, load and total time) once
-generation finishes:
+`nvfp4-stream`. There's no separate benchmark mode. Every run streams
+generated text to stdout as it's produced, then prints a JSON stats block
+(prompt/generation tok/sec, peak memory, load and total time):
 
 ```sh
 .venv/bin/nvfp4-stream \
@@ -115,7 +114,13 @@ Key options:
 | `--device {metal,cpu}` | Run on the Metal GPU backend or CPU-only |
 | `--prompt` | The user message |
 | `--max-tokens` | How many tokens to generate |
+| `--prefill-chunk` | Prompt tokens per prefill forward; defaults to 2048 resident or expert slots divided by top-K when streaming |
 | `--expert-mode {auto,resident,stream}` | Load every expert, stream experts, or choose from checkpoint and memory size |
+| `--compile` | Compile NVFP4 expert compute with MLX |
+| `--runs` | Number of in-process inference runs |
+| `--stats-output <file>` | Write every run's metrics as one JSON list |
+| `--quiet-inference` | Suppress generated text while retaining statistics |
+| `--expert-stats` | Add per-run expert-cache cold/capacity misses and residency to the JSON statistics |
 | `--expert-budget-gib` | Unified memory given to the expert cache in stream mode |
 | `--workers` | Parallel checkpoint readers for resident preload and streamed cache fills |
 | `--temp`, `--top-p` | Sampling parameters |
@@ -132,7 +137,12 @@ Key options:
 | `make install` | Creates a venv, builds MLX from the #4458 merge commit, and installs mlx-lm and this adapter |
 | `make patch` | Applies the mlx-lm patches this adapter needs |
 | `make test` | Asks the model for the capital of Austria |
+| `make test-compile` | Runs the same test with MLX compilation |
+| `make run` | Runs the interpreted Metal essay `RERUN_INTERPRETED` times and writes the metrics to `interpreted-runs.json` |
+| `make run-compile` | Runs the compiled Metal essay `RERUN_COMPILED` times and writes the metrics to `compile-runs.json` |
 | `make metal-bench` | Times a 500-token essay on Metal |
 | `make cpu-bench` | Times the short capital-of-Austria prompt CPU-only |
 | `make all` | Runs all of the above in order |
 | `make clean` | Removes the venv |
+
+Override the rerun counts with `RERUN_INTERPRETED` and `RERUN_COMPILED`.
