@@ -9,7 +9,8 @@ quantized down after the fact. I wanted to see it run on a Mac, with NVFP4
 weights, without no requantizing, GGUF conversion or other preprocessing -- 
 because that means you can run any NVFP4 model (subject to operator support) 
 on your Mac. nvfp4-stream runs the original 
-`nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` ModelOpt checkpoint
+`nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` NVFP4 checkpoint in the
+ModelOpt layout
 straight off disk on your Apple Silicon Mac. If you want to see NVFP4 running 
 on a GPU instead, including for free on the Colab T4 tier, see
 [nvfp4-on-turing](https://github.com/mikekg/nvfp4-on-turing) for a Google Colab
@@ -20,14 +21,14 @@ version.
 `nvfp4_stream` is an adapter for the Nemotron-H checkpoint layout (`model_type:
 nemotron_h` in `config.json`) — it isn't restricted to one specific model
 size, but it is restricted to that architecture family. It reads a model's
-NVFP4 ModelOpt shards directly from the source safetensors files, decoding
-routed experts on demand instead of holding the full expert weight set
-resident (59 GB for Super 120B). No model file is rewritten, no weight is
-requantized. It runs on a patched MLX Metal kernel that adds per-expert NVFP4
-`global_scale` support, from an as-yet-unmerged MLX pull request
-([ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458)) — `make
-install` builds MLX from that PR commit, not from a release, since the
-required kernel isn't in one yet.
+NVFP4 shards in the ModelOpt layout directly from the source safetensors files.
+When the checkpoint fits in unified memory, all experts are loaded before
+generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
+of routed experts). No model file is rewritten, no weight is requantized. It
+runs on the MLX Metal kernel's per-expert NVFP4 `global_scale` support from
+[ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458). `make
+install` builds MLX from that merge commit until the required kernel appears
+in a release.
 
 The Nemotron-H family is the first target, not the only intended one and adding
 support for other models should be straightforward: Today, `index.py` hard-checks 
@@ -51,7 +52,8 @@ layouts should be straightforward, though.
   brew install make
   ```
 - Python 3.10+
-- ~80 GB free disk for the checkpoint, ~25 GB free unified memory to run it
+- Free disk for the selected checkpoint (~19 GB for Nano, ~80 GB for Super)
+- ~25 GB free unified memory to run it
 
 ## Install and run
 
@@ -69,10 +71,10 @@ MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 make all
 ```
 
 Nano 30B is also `model_type: nemotron_h`, so the adapter reads its expert
-layout the same way it reads Super's. It has not been run end to end through
-this adapter yet — Super 120B is the one these benchmarks are from.
+layout the same way it reads Super's. On the tested 36 GB M3 Pro it runs fully
+resident, using 20.07 GB peak memory and generating at 32.78 tokens/second.
 
-`make all` downloads the 80 GB checkpoint, builds the patched MLX and
+`make all` downloads the selected checkpoint, builds MLX and
 installs the adapter, applies the mlx-lm patches this needs, asks the model
 for the capital of Austria as a sanity check, then runs the two benchmarks
 below.
@@ -113,8 +115,9 @@ Key options:
 | `--device {metal,cpu}` | Run on the Metal GPU backend or CPU-only |
 | `--prompt` | The user message |
 | `--max-tokens` | How many tokens to generate |
-| `--expert-budget-gib` | Unified memory given to the resident expert cache |
-| `--workers` | Parallel readers for streaming expert weights off disk |
+| `--expert-mode {auto,resident,stream}` | Load every expert, stream experts, or choose from checkpoint and memory size |
+| `--expert-budget-gib` | Unified memory given to the expert cache in stream mode |
+| `--workers` | Parallel checkpoint readers for resident preload and streamed cache fills |
 | `--temp`, `--top-p` | Sampling parameters |
 | `--output <file>` | Also write the generated text to a file |
 | `--raw-prompt` | Skip the chat template, send the prompt as-is |
@@ -126,7 +129,7 @@ Key options:
 | Target | Does |
 |---|---|
 | `make download` / `make model` | Downloads the NVFP4 checkpoint from Hugging Face |
-| `make install` | Creates a venv, builds patched MLX from the PR commit, installs mlx-lm and this adapter |
+| `make install` | Creates a venv, builds MLX from the #4458 merge commit, and installs mlx-lm and this adapter |
 | `make patch` | Applies the mlx-lm patches this adapter needs |
 | `make test` | Asks the model for the capital of Austria |
 | `make metal-bench` | Times a 500-token essay on Metal |

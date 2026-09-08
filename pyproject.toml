@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nvfp4-stream"
 version = "0.1.0"
-description = "Direct ModelOpt NVFP4 expert streaming for Nemotron-H models on Apple Silicon"
+description = "Direct ModelOpt-layout NVFP4 inference for Nemotron-H on Apple Silicon"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.26"]
 
@@ -17,4 +17,3 @@ nvfp4-stream = "nvfp4_stream.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["nvfp4_stream*"]
-

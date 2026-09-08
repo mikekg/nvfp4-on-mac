@@ -11,17 +11,21 @@ import time
 from pathlib import Path
 
 from .index import ModelOptIndex
+from .runtime import select_expert_mode
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run original ModelOpt NVFP4 Nemotron-H shards on Apple Silicon"
+        description="Run original NVFP4 Nemotron-H shards in the ModelOpt layout"
     )
     parser.add_argument("--model", required=True, help="local Hugging Face checkpoint directory")
     parser.add_argument("--prompt", default="Hello", help="one user message")
     parser.add_argument("--output", type=Path, help="write generated text to this file")
     parser.add_argument("--max-tokens", type=int, default=1)
     parser.add_argument("--expert-budget-gib", type=float, default=8.0)
+    parser.add_argument(
+        "--expert-mode", choices=("auto", "resident", "stream"), default="auto"
+    )
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--device", choices=("metal", "cpu"), default="metal")
     parser.add_argument("--temp", type=float, default=0.0)
@@ -44,10 +48,18 @@ def main(argv=None) -> None:
         summary = index.validate_experts()
     except (FileNotFoundError, KeyError, ValueError) as error:
         raise SystemExit(str(error)) from error
+    expert_mode = select_expert_mode(args.expert_mode, index.source_bytes)
+    summary["expert_mode"] = expert_mode
+    summary["source_gib"] = round(index.source_bytes / (1 << 30), 3)
     summary["routed_gib"] = round(summary["routed_bytes"] / (1 << 30), 3)
-    summary["slots_per_layer"] = min(
-        index.num_experts,
-        int(args.expert_budget_gib * (1 << 30)) // summary["bytes_per_slot_set"],
+    summary["slots_per_layer"] = (
+        index.num_experts
+        if expert_mode == "resident"
+        else min(
+            index.num_experts,
+            int(args.expert_budget_gib * (1 << 30))
+            // summary["bytes_per_slot_set"],
+        )
     )
     print(json.dumps(summary, indent=2))
     if args.check_only:
@@ -65,6 +77,7 @@ def main(argv=None) -> None:
     with streaming_model(
         model_dir,
         expert_budget_gib=args.expert_budget_gib,
+        expert_mode=expert_mode,
         workers=args.workers,
         trust_remote_code=args.trust_remote_code,
     ) as (model, tokenizer, pools, reader):
@@ -77,9 +90,10 @@ def main(argv=None) -> None:
                 return_dict=False,
             )
         sampler = make_sampler(temp=args.temp, top_p=args.top_p)
-        prefill_step_size = max(
-            1,
-            min(pool.slots for pool in pools.values()) // index.top_k,
+        prefill_step_size = (
+            2048
+            if expert_mode == "resident"
+            else max(1, min(pool.slots for pool in pools.values()) // index.top_k)
         )
         output = []
         for response in stream_generate(

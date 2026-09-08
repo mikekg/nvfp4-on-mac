@@ -35,6 +35,7 @@ DTYPE_SIZE = {
 
 PROJECTIONS = ("up_proj", "down_proj")
 SOURCE_PARTS = ("weight", "weight_scale", "weight_scale_2", "input_scale")
+NVFP4_SCALE_DENOM = 6.0 * 448.0
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,17 @@ class ModelOptIndex:
         self.config = json.loads(config_path.read_text())
         if self.config.get("model_type") != "nemotron_h":
             raise ValueError("this adapter only supports model_type=nemotron_h")
-        qconfig = self.config.get("quantization_config", {})
-        if qconfig.get("quant_method") != "modelopt":
-            raise ValueError("checkpoint is not a ModelOpt checkpoint")
+        qconfig = self.config.get("quantization_config") or {}
+        hf_quant_path = self.model_dir / "hf_quant_config.json"
+        hf_quant = (
+            json.loads(hf_quant_path.read_text()) if hf_quant_path.is_file() else {}
+        )
+        declares_nvfp4 = (
+            hf_quant.get("quantization", {}).get("quant_algo", "").upper()
+            == "NVFP4"
+        )
+        if qconfig.get("quant_method") != "modelopt" and not declares_nvfp4:
+            raise ValueError("checkpoint does not declare supported NVFP4 metadata")
 
         files = sorted(glob.glob(str(self.model_dir / "model*.safetensors")))
         if not files:
@@ -87,6 +96,7 @@ class ModelOptIndex:
         self.tensors: dict[str, TensorLoc] = {}
         for filename in files:
             self._read_header(filename)
+        self.source_bytes = sum(tensor.nbytes for tensor in self.tensors.values())
 
         pattern = self.config.get("hybrid_override_pattern")
         if not pattern:
@@ -181,6 +191,7 @@ class ModelOptIndex:
             "layers": len(self.moe_layers),
             "experts_per_layer": self.num_experts,
             "top_k": self.top_k,
+            "source_bytes": self.source_bytes,
             "routed_bytes": total,
             "bytes_per_slot_set": sum(
                 self.expert_slot_bytes(layer) for layer in self.moe_layers

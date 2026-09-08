@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Coalesced pread of individual ModelOpt expert tensors."""
+"""Coalesced pread of individual expert tensors in the ModelOpt layout."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from .index import PROJECTIONS, ModelOptIndex, TensorLoc
+from .index import NVFP4_SCALE_DENOM, PROJECTIONS, ModelOptIndex, TensorLoc
 
 
 class ExpertReader:
@@ -91,8 +91,10 @@ class ExpertReader:
 
     @staticmethod
     def _global_scale_value(raw: memoryview, loc: TensorLoc) -> np.float32:
-        # ModelOpt stores amax/(6*448). MLX's global_scale argument is amax.
-        return np.float32(np.frombuffer(raw, dtype="<f4", count=1)[0] * 2688.0)
+        # The ModelOpt format stores amax/(6*448). MLX's global_scale argument is amax.
+        return np.float32(
+            np.frombuffer(raw, dtype="<f4", count=1)[0] * NVFP4_SCALE_DENOM
+        )
 
     def read_experts_numpy(self, layer: int, experts: list[int]) -> dict:
         requests = []

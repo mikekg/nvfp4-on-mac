@@ -12,9 +12,9 @@ MLX_LM_DIR := mlx-lm
 EXPERT_BUDGET_GIB := 8
 
 # ml-explore/mlx#4458 adds the per-expert NVFP4 global_scale support that
-# gather_qmm needs for this model. It is not in any mlx release yet, so we
-# build it from the PR commit instead of `pip install mlx`.
-MLX_PR_SHA := 285ab899087ecfbae9390c1e96b1571f86a5ef8a
+# gather_qmm needs for this model. Build its merge commit until a release
+# contains it.
+MLX_SHA := cbb4059d8c6652d1c2cce98c348a8a689eb275b8
 
 PROMPT_TEST  := What is the capital of Austria?
 PROMPT_ESSAY := Write a 500-word essay about the beauty of Austria and its capital city.
@@ -25,11 +25,7 @@ PROMPT_ESSAY := Write a 500-word essay about the beauty of Austria and its capit
 # and `make download` both do the same thing.
 download: $(VENV)/bin/python3
 	@mkdir -p $(dir $(MODEL_DIR))
-	@if [ -f "$(MODEL_DIR)/model.safetensors.index.json" ]; then \
-		echo "Checkpoint already present at $(MODEL_DIR), skipping download."; \
-	else \
-		HF_HUB_ENABLE_HF_TRANSFER=0 $(VENV)/bin/hf download $(MODEL_ID) --local-dir $(MODEL_DIR); \
-	fi
+	$(VENV)/bin/hf download $(MODEL_ID) --local-dir $(MODEL_DIR)
 
 model: download
 
@@ -42,8 +38,8 @@ install: $(VENV)/bin/python3 download
 		git clone https://github.com/ml-explore/mlx-lm.git $(MLX_LM_DIR); \
 	fi
 	$(PIP) install -q -e $(MLX_LM_DIR) --no-deps
-	@echo "Building MLX from ml-explore/mlx#4458 (not in any release yet, this takes a few minutes)..."
-	$(PIP) install -q "git+https://github.com/ml-explore/mlx.git@$(MLX_PR_SHA)"
+	@echo "Building MLX from the ml-explore/mlx#4458 merge commit (this takes a few minutes)..."
+	$(PIP) install -q "git+https://github.com/ml-explore/mlx.git@$(MLX_SHA)"
 	$(PIP) install -q -e . --no-deps
 
 patch:
