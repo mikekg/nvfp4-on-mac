@@ -418,7 +418,9 @@ def load_streaming_model(
     model_dir = Path(model_dir).resolve()
     index = ModelOptIndex(model_dir)
     summary = index.validate_experts()
-    expert_mode = select_expert_mode(expert_mode, index.source_bytes)
+    expert_mode = select_expert_mode(
+        expert_mode if index.moe_layers else "resident", index.source_bytes
+    )
     budget = int(expert_budget_gib * (1 << 30))
     slots = (
         index.num_experts

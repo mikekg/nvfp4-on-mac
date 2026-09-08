@@ -2,10 +2,11 @@
 
 ## Why expert streaming works
 
-Nemotron-H is a mixture-of-experts (MoE) model. Most of its weight bytes are
-in expert feed-forward networks. Each MoE layer has many experts, but a router
-selects only the top-K experts needed for each token. The other experts do no
-work for that token.
+Nemotron-H checkpoints can contain dense layers, mixture-of-experts (MoE)
+layers, or both. In an MoE model, most of the weight bytes are in expert
+feed-forward networks. Each MoE layer has many experts, but a router selects
+only the top-K experts needed for each token. The other experts do no work for
+that token.
 
 This divides the model into two kinds of data:
 
@@ -92,7 +93,20 @@ when every requested expert is already cached.
 
 `auto` selects resident mode when the checkpoint source bytes fit within 75%
 of physical memory after a 4 GiB reserve; otherwise it selects streaming.
-`--expert-mode resident` and `--expert-mode stream` override that choice.
+For checkpoints with routed experts, `--expert-mode resident` and
+`--expert-mode stream` override that choice.
+
+## Dense-only checkpoints
+
+A checkpoint with no `E` layers has no routed experts to cache or stream. All
+weights are loaded into unified memory, so the runtime reports resident mode
+and builds no `ExpertPool` objects. Static NVFP4 linears use the same packed
+NVFP4 computation as common weights in MoE checkpoints, while excluded BF16
+weights retain their checkpoint dtype.
+
+Expert-cache budgets, workers, and statistics have no work to perform for a
+dense-only checkpoint. `--compile` currently compiles only routed-expert
+computation, so dense-only runs report compilation as disabled.
 
 ## Prefill and compilation
 
@@ -104,6 +118,11 @@ to the cache capacity. `--prefill-chunk` overrides either default.
 cache management, reloads, remapping, and statistics stay outside the compiled
 function. Cache slots are fixed MLX tensors, so their contents can change
 without rebuilding the compiled function.
+
+The complete Nemotron-H model is not compiled because generation mutates
+Mamba state and, in hybrid models, attention KV state. Those cache objects are
+not pure MLX array inputs and outputs, so compiling the model call would capture
+stale state rather than preserve token-to-token updates.
 
 MLX compilation is lazy. The first inference run includes JIT compilation for
 the shapes it encounters, so its timing contains both compilation and
@@ -135,8 +154,14 @@ Resident mode reports all experts loaded and zero inference-time cache
 activity. It omits `unique_experts_accessed` because resident inference does
 not copy router results to the host merely to collect statistics.
 
+Dense-only runs report zero expert and `ExpertReader` I/O activity because
+neither subsystem exists; those zeros do not mean the checkpoint was not
+loaded.
+
 ## Scope
 
-The loader currently supports `model_type=nemotron_h` with its ModelOpt NVFP4
-tensor layout. It reads checkpoint shards in place and never rewrites,
-repacks, or requantizes their weights.
+The loader supports dense, MoE, and mixed `model_type=nemotron_h` checkpoints
+declared as `NVFP4` or `MIXED_PRECISION`, plus dense-only `FP8` checkpoints.
+Routed experts must use the NVFP4 tensor layout. Static FP8 weights are expanded
+to BF16 once while loading; BF16 weights retain their checkpoint dtype. The
+loader reads checkpoint shards in place and never rewrites the checkpoint.

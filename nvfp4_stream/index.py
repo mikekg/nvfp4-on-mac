@@ -59,18 +59,19 @@ class ModelOptIndex:
         self.config = json.loads(config_path.read_text())
         if self.config.get("model_type") != "nemotron_h":
             raise ValueError("this adapter only supports model_type=nemotron_h")
-        qconfig = self.config.get("quantization_config") or {}
         hf_quant_path = self.model_dir / "hf_quant_config.json"
         hf_quant = (
             json.loads(hf_quant_path.read_text()) if hf_quant_path.is_file() else {}
         )
-        declares_nvfp4 = (
-            hf_quant.get("quantization", {}).get("quant_algo", "").upper()
-            == "NVFP4"
-        )
-        if qconfig.get("quant_method") != "modelopt" and not declares_nvfp4:
-            raise ValueError("checkpoint does not declare supported NVFP4 metadata")
-
+        quant_algo = (
+            hf_quant.get("quantization", {}).get("quant_algo")
+            or (self.config.get("quantization_config") or {}).get("quant_algo")
+            or ""
+        ).upper()
+        if quant_algo not in {"NVFP4", "MIXED_PRECISION", "FP8"}:
+            raise ValueError(
+                f"unsupported quantization algorithm: {quant_algo or 'none'}"
+            )
         files = sorted(glob.glob(str(self.model_dir / "model*.safetensors")))
         if not files:
             raise FileNotFoundError(f"no model*.safetensors under {self.model_dir}")
@@ -98,12 +99,18 @@ class ModelOptIndex:
             self._read_header(filename)
         self.source_bytes = sum(tensor.nbytes for tensor in self.tensors.values())
 
-        pattern = self.config.get("hybrid_override_pattern")
+        pattern = self.config.get("hybrid_override_pattern") or self.config.get(
+            "layers_block_type"
+        )
         if not pattern:
-            raise ValueError("config has no hybrid_override_pattern")
-        self.moe_layers = tuple(i for i, kind in enumerate(pattern) if kind == "E")
-        self.num_experts = int(self.config["n_routed_experts"])
-        self.top_k = int(self.config["num_experts_per_tok"])
+            raise ValueError("config has no layer pattern")
+        self.moe_layers = tuple(
+            i for i, kind in enumerate(pattern) if kind in ("E", "moe")
+        )
+        self.num_experts = (
+            int(self.config["n_routed_experts"]) if self.moe_layers else 0
+        )
+        self.top_k = int(self.config["num_experts_per_tok"]) if self.moe_layers else 0
 
     def _read_header(self, filename: str) -> None:
         file_size = os.path.getsize(filename)
