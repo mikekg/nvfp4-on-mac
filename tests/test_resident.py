@@ -35,16 +35,15 @@ def run(device) -> None:
             json.dumps(
                 {
                     "model_type": "nemotron_h",
-                    "hybrid_override_pattern": "E",
+                    "layers_block_type": ["moe"],
                     "n_routed_experts": experts,
                     "num_experts_per_tok": top_k,
                 }
             )
         )
         (path / "hf_quant_config.json").write_text(
-            json.dumps({"quantization": {"quant_algo": "NVFP4"}})
+            json.dumps({"quantization": {"quant_algo": "MIXED_PRECISION"}})
         )
-
         source = {}
         dense = {}
         quantized = {}
@@ -195,6 +194,33 @@ def run(device) -> None:
                 )
         finally:
             reader.close()
+
+        dense_path = Path(tmp) / "dense"
+        dense_path.mkdir()
+        (dense_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "nemotron_h",
+                    "hybrid_override_pattern": "M",
+                }
+            )
+        )
+        (dense_path / "hf_quant_config.json").write_text(
+            json.dumps({"quantization": {"quant_algo": "NVFP4"}})
+        )
+        mx.save_safetensors(
+            str(dense_path / "model-00001-of-00001.safetensors"),
+            {"backbone.layers.0.norm.weight": mx.ones((1,))},
+        )
+        dense_index = ModelOptIndex(dense_path)
+        assert dense_index.num_layers == 1 and dense_index.moe_layers == ()
+        assert dense_index.num_experts == dense_index.top_k == 0
+        assert dense_index.validate_experts()["bytes_per_slot_set"] == 0
+
+        (dense_path / "hf_quant_config.json").write_text(
+            json.dumps({"quantization": {"quant_algo": "FP8"}})
+        )
+        assert ModelOptIndex(dense_path).moe_layers == ()
 
 
 if __name__ == "__main__":

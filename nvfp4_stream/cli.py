@@ -66,9 +66,12 @@ def main(argv=None) -> None:
         summary = index.validate_experts()
     except (FileNotFoundError, KeyError, ValueError) as error:
         raise SystemExit(str(error)) from error
-    expert_mode = select_expert_mode(args.expert_mode, index.source_bytes)
+    expert_mode = select_expert_mode(
+        args.expert_mode if index.moe_layers else "resident", index.source_bytes
+    )
+    compile_experts = args.compile and bool(index.moe_layers)
     summary["expert_mode"] = expert_mode
-    summary["compile"] = args.compile
+    summary["compile"] = compile_experts
     summary["runs"] = args.runs
     summary["expert_stats"] = args.expert_stats
     summary["source_gib"] = round(index.source_bytes / (1 << 30), 3)
@@ -111,7 +114,7 @@ def main(argv=None) -> None:
         expert_stats=args.expert_stats,
     ) as (model, tokenizer, pools, reader):
         load_seconds = time.perf_counter() - started
-        if args.compile:
+        if compile_experts:
             for layer, pool in pools.items():
                 expert = model.backbone.layers[layer].mixer.switch_mlp
                 expert._forward = mx.compile(
@@ -156,7 +159,7 @@ def main(argv=None) -> None:
             stats = aggregate_stats(pools, reader, args.expert_stats)
             stats.update(
                 run=run,
-                compile=args.compile,
+                compile=compile_experts,
                 prompt_tokens=response.prompt_tokens,
                 prompt_tps=response.prompt_tps,
                 generation_tokens=response.generation_tokens,
