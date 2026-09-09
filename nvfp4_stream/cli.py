@@ -17,7 +17,7 @@ from .runtime import select_expert_mode
 def _parser() -> argparse.ArgumentParser:
     """Build the command-line interface for validation and inference."""
     parser = argparse.ArgumentParser(
-        description="Run original ModelOpt-layout NVFP4 shards on MLX"
+        description="Run supported Hugging Face checkpoints on MLX"
     )
     parser.add_argument("--model", required=True, help="local Hugging Face checkpoint directory")
     parser.add_argument("--prompt", default="Hello", help="one user message")
@@ -46,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--mlx-cache-gib", type=float, default=0.5)
     parser.add_argument(
-        "--compile", action="store_true", help="compile NVFP4 expert compute with MLX"
+        "--compile", action="store_true", help="compile routed-expert compute with MLX"
     )
     parser.add_argument("--runs", type=int, default=1)
     return parser
@@ -73,8 +73,10 @@ def main(argv=None) -> None:
     )
     compile_experts = args.compile and bool(index.moe_layers)
     summary["expert_mode"] = expert_mode
-    summary["format"] = index.quant_algo or index.config.get(
-        "torch_dtype", "unknown"
+    summary["format"] = (
+        index.quant_algo
+        or index.config.get("dtype")
+        or index.config.get("torch_dtype", "unknown")
     )
     summary["compile"] = compile_experts
     summary["runs"] = args.runs

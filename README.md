@@ -20,7 +20,8 @@ version.
 
 `nvfp4_stream` reads Hugging Face safetensors directly for Nemotron-H and dense
 Llama and Qwen2 checkpoints. It keeps NVFP4 packed, expands FP8 to BF16 in memory,
-and loads BF16 unchanged. It is not restricted to one specific model size.
+and loads BF16 unchanged. Routed expert caches support packed NVFP4 and BF16.
+It is not restricted to one specific model size.
 When the checkpoint fits in unified memory, all experts are loaded before
 generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
 of routed experts). No model file is rewritten, no weight is requantized. It
@@ -124,14 +125,14 @@ Options:
 | `--trust-remote-code` | Allow Hugging Face remote code while loading |
 | `--check-only` | Validate and summarize the checkpoint without loading the model |
 | `--mlx-cache-gib GIB` | MLX cache limit; default `0.5` GiB |
-| `--compile` | Compile NVFP4 expert compute with MLX |
+| `--compile` | Compile routed-expert compute with MLX |
 | `--runs N` | Sequential runs sharing one loaded model and expert cache; default `1` |
 
 ## Makefile targets
 
 | Target | Does |
 |---|---|
-| `make download` / `make model` | Downloads the NVFP4 checkpoint from Hugging Face |
+| `make download` / `make model` | Downloads the selected checkpoint from Hugging Face |
 | `make install` | Creates a venv and installs release MLX, mlx-lm, and this adapter |
 | `make patch` | Applies the mlx-lm final-lookahead patch |
 | `make test` | Asks the model for the capital of Austria |

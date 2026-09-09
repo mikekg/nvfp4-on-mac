@@ -70,9 +70,7 @@ class ModelOptIndex:
             or (self.config.get("quantization_config") or {}).get("quant_algo")
             or ""
         ).upper()
-        if self.quant_algo not in {"NVFP4", "MIXED_PRECISION", "FP8"} and not (
-            self.model_type in {"llama", "qwen2"} and not self.quant_algo
-        ):
+        if self.quant_algo and self.quant_algo not in {"NVFP4", "MIXED_PRECISION", "FP8"}:
             raise ValueError(
                 f"unsupported quantization algorithm: {self.quant_algo or 'none'}"
             )
@@ -167,6 +165,11 @@ class ModelOptIndex:
     @staticmethod
     def _expert_format(parts: dict[str, TensorLoc]) -> str:
         """Validate one projection's stored representation and record its format."""
+        if set(parts) == {"weight"}:
+            weight = parts["weight"]
+            if weight.dtype != "BF16" or len(weight.shape) != 2:
+                raise ValueError(f"{weight.name}: expected a BF16 matrix")
+            return "bf16"
         if set(parts) != set(SOURCE_PARTS):
             raise ValueError("incomplete NVFP4 expert tensor set")
         weight = parts["weight"]
@@ -213,7 +216,9 @@ class ModelOptIndex:
                 format = self._expert_format(parts)
                 self.expert_formats[layer][projection] = format
                 weight = parts["weight"]
-                shapes[projection] = (weight.shape[0], weight.shape[1] * 2)
+                shapes[projection] = (
+                    weight.shape[0], weight.shape[1] * (2 if format == "nvfp4" else 1)
+                )
                 signature = {part: (loc.dtype, loc.shape) for part, loc in parts.items()}
                 for expert in range(self.num_experts):
                     prefix = self.expert_prefix(layer, expert, projection)

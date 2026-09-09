@@ -1,6 +1,8 @@
 # MODEL_ID ?= nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
 # MODEL_ID ?= nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8
 # MODEL_ID ?= Qwen/Qwen2.5-3B-Instruct
+# MODEL_ID ?= nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+# EXPERT_BUDGET_GIB ?= 10
 # MODEL_ID ?= nvidia/Llama-3.1-8B-Instruct-NVFP4
 # MODEL_ID ?= nvidia/Llama-3.1-8B-Instruct-FP8
 # MODEL_ID ?= meta-llama/Llama-3.1-8B-Instruct
@@ -13,7 +15,7 @@ PIP        := $(VENV)/bin/pip
 RUN        := $(VENV)/bin/nvfp4-stream
 
 MLX_LM_DIR := mlx-lm
-EXPERT_BUDGET_GIB := 8
+EXPERT_BUDGET_GIB ?= 8
 RERUN_COMPILED ?= 2
 RERUN_INTERPRETED ?= 2
 

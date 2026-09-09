@@ -215,6 +215,78 @@ def run(device) -> None:
             else:
                 raise AssertionError("invalid expert layout was accepted")
 
+        bf16_path = Path(tmp) / "bf16-moe"
+        bf16_path.mkdir()
+        (bf16_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "nemotron_h",
+                    "layers_block_type": ["moe"],
+                    "n_routed_experts": 2,
+                    "num_experts_per_tok": 1,
+                }
+            )
+        )
+        bf16_weights = {
+            0: {
+                "up_proj": mx.array(
+                    [[1, 0], [0, 1], [1, 1]], dtype=mx.bfloat16
+                ),
+                "down_proj": mx.array([[1, 0, 0], [0, 0, 1]], dtype=mx.bfloat16),
+            },
+            1: {
+                "up_proj": mx.array(
+                    [[0, -1], [1, 0], [1, -1]], dtype=mx.bfloat16
+                ),
+                "down_proj": mx.array([[1, 1, 0], [0, 1, -1]], dtype=mx.bfloat16),
+            },
+        }
+        mx.save_safetensors(
+            str(bf16_path / "model-00001-of-00001.safetensors"),
+            {
+                f"backbone.layers.0.mixer.experts.{expert}.{projection}.weight": weight
+                for expert, projections in bf16_weights.items()
+                for projection, weight in projections.items()
+            },
+        )
+
+        bf16_index = ModelOptIndex(bf16_path)
+        assert bf16_index.expert_formats == {0: {"up_proj": "bf16", "down_proj": "bf16"}}
+        assert bf16_index.expert_summary["bytes_per_slot_set"] == 24
+        bf16_reader = ExpertReader(bf16_index)
+        try:
+            x = mx.array([[[2, -1], [2, -1]]], dtype=mx.bfloat16)
+            indices = mx.array([[[0], [1]]], dtype=mx.uint32)
+            expected = mx.array([[[[4, 1]], [[5, -5]]]], dtype=mx.bfloat16)
+
+            streamed_pool = ExpertPool(
+                bf16_index, bf16_reader, layer=0, slots=1, expert_stats=True
+            )
+            assert streamed_pool.tensors["up_proj"]["weight"].dtype == mx.bfloat16
+            streamed_module = _expert_module(streamed_pool)
+            streamed_module._forward = mx.compile(
+                streamed_module._forward, inputs=streamed_pool.tensors
+            )
+            streamed = streamed_module(x, indices)
+            mx.eval(streamed, expected)
+            assert mx.allclose(streamed, expected, rtol=0, atol=0).item()
+            assert streamed_pool.misses == 2
+            assert streamed_pool.evictions == 1
+
+            resident_pool = ExpertPool(
+                bf16_index, bf16_reader, layer=0, slots=2, expert_stats=True
+            )
+            resident_pool.preload_all()
+            reads = bf16_reader.reads
+            hits = resident_pool.hits
+            resident = _expert_module(resident_pool)(x, indices)
+            mx.eval(resident)
+            assert bf16_reader.reads == reads
+            assert resident_pool.hits == hits
+            assert mx.allclose(resident, expected, rtol=0, atol=0).item()
+        finally:
+            bf16_reader.close()
+
         dense_path = Path(tmp) / "dense"
         dense_path.mkdir()
         (dense_path / "config.json").write_text(
@@ -290,4 +362,4 @@ if __name__ == "__main__":
     parser.add_argument("--device", choices=("metal", "cpu"), default="metal")
     args = parser.parse_args()
     run(mx.gpu if args.device == "metal" else mx.cpu)
-    print(f"{args.device} streamed/resident NVFP4 smoke: PASS")
+    print(f"{args.device} streamed/resident expert smoke: PASS")

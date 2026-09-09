@@ -28,9 +28,9 @@ The index validates each layer's expert layout once and records its projection
 formats; loading and computation reuse that metadata.
 
 Each MoE layer receives an `ExpertPool`: a fixed number of memory slots used as
-that layer's expert cache. One slot holds one expert's NVFP4 `up_proj` and
-`down_proj` weights and scales. Pools are independent because expert 10 in one
-layer has different weights from expert 10 in another layer.
+that layer's expert cache. One slot holds one expert's `up_proj` and `down_proj`
+weights, plus scales when those weights are NVFP4. Pools are independent because
+expert 10 in one layer has different weights from expert 10 in another layer.
 
 Inference then follows this path:
 
@@ -40,7 +40,7 @@ Inference then follows this path:
 4. Missing experts are read from their original safetensors byte ranges and
    copied into cache slots in unified memory.
 5. Router expert IDs are remapped to their current slot IDs.
-6. The NVFP4 expert computation runs from the cached slots.
+6. The NVFP4 or BF16 expert computation runs from the cached slots.
 7. Decode generates one token at a time and repeats the same lookup at every
    MoE layer.
 
@@ -79,12 +79,12 @@ slots in every layer.
 ## Resident mode
 
 Resident mode has enough memory for every expert. At startup, it loads every
-expert's weights and scales into a complete bank of arrays for each MoE layer
-and calls `mx.eval` so those arrays are materialized before inference. The
-checkpoint files are then closed.
+expert's weights and any scales into a complete bank of arrays for each MoE
+layer and calls `mx.eval` so those arrays are materialized before inference.
+The checkpoint files are then closed.
 
 The arrays are indexed by expert ID: expert 347 is stored at index 347. When
-the router selects experts 17 and 347, the NVFP4 computation reads indices 17
+the router selects experts 17 and 347, the expert computation reads indices 17
 and 347 directly. By contrast, a streaming cache might currently store expert
 347 in slot 12 and must look up that mapping first.
 
@@ -115,7 +115,7 @@ Resident prefill defaults to 2048 tokens. Streaming prefill defaults to
 `floor(slots_per_layer / top_k)`, limiting the worst-case selected expert set
 to the cache capacity. `--prefill-chunk` overrides either default.
 
-`--compile` compiles only the numerical NVFP4 expert computation. Routing,
+`--compile` compiles only the numerical routed-expert computation. Routing,
 cache management, reloads, remapping, and statistics stay outside the compiled
 function. Cache slots are fixed MLX tensors, so their contents can change
 without rebuilding the compiled function.
@@ -143,7 +143,8 @@ Every run reports:
 - Peak memory, model load time, run time, cumulative process time, finish
   reason, run number, and whether compilation was enabled.
 
-`--expert-stats` resets the cache and I/O counters before each run and adds:
+`--expert-stats` resets expert-cache statistics and I/O counters before each
+run and adds:
 
 - `cold_misses` and `capacity_misses`.
 - `experts_loaded`, the number of occupied layer cache slots at the end of the
@@ -163,7 +164,7 @@ loaded.
 
 The loader supports dense, MoE, and mixed `model_type=nemotron_h` checkpoints,
 plus dense `model_type=llama` and `model_type=qwen2` checkpoints. Metadata may
-declare `NVFP4`, `MIXED_PRECISION`, or `FP8`; routed experts must use the NVFP4 tensor layout.
+declare `NVFP4`, `MIXED_PRECISION`, or `FP8`; routed experts may use packed NVFP4 or BF16 weights.
 Static FP8 weights are expanded to BF16 once while loading, and BF16 weights
 retain their checkpoint dtype. The loader reads checkpoint shards in place and
-never rewrites the checkpoint.
+never rewrites, repacks, or requantizes the checkpoint.

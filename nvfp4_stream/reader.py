@@ -124,6 +124,14 @@ class ExpertReader:
             output[expert] = {}
             for projection in PROJECTIONS:
                 key = (expert, projection)
+                if self.index.expert_formats[layer][projection] == "bf16":
+                    weight = locations[key + ("weight",)]
+                    output[expert][projection] = {
+                        "weight": np.frombuffer(
+                            raw[key + ("weight",)], dtype="<u2"
+                        ).reshape(weight.shape)
+                    }
+                    continue
                 parts = {
                     "weight": self._weight_np(
                         raw[key + ("weight",)], locations[key + ("weight",)]
@@ -156,6 +164,9 @@ class ExpertReader:
             output[expert] = {}
             for projection, parts in projections.items():
                 weight = mx.array(parts["weight"])
+                if self.index.expert_formats[layer][projection] == "bf16":
+                    output[expert][projection] = {"weight": weight.view(mx.bfloat16)}
+                    continue
                 row = {"weight": weight}
                 row.update(
                     scales=mx.array(parts["scales"]),

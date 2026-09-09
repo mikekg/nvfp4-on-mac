@@ -68,6 +68,11 @@ class ExpertPool:
         for projection in PROJECTIONS:
             parts = index.expert_parts(layer, 0, projection)
             weight_shape = parts["weight"].shape
+            if self.formats[projection] == "bf16":
+                self.tensors[projection] = {
+                    "weight": mx.zeros((slots,) + weight_shape, dtype=mx.bfloat16)
+                }
+                continue
             weight_shape = weight_shape[:-1] + (weight_shape[-1] // 4,)
             self.tensors[projection] = {
                 "weight": mx.zeros((slots,) + weight_shape, dtype=mx.uint32),
@@ -149,10 +154,8 @@ class ExpertPool:
             slot = self.id_to_slot[expert]
             for projection in PROJECTIONS:
                 row = rows[expert][projection]
-                self._record_input_scale(
-                    projection,
-                    row["input_global_scale"],
-                )
+                if self.formats[projection] == "nvfp4":
+                    self._record_input_scale(projection, row["input_global_scale"])
                 for part in self.tensors[projection]:
                     self.tensors[projection][part][slot] = row[part]
         self.evaluate()
@@ -166,10 +169,11 @@ class ExpertPool:
         experts = list(range(self.index.num_experts))
         rows = self.reader.read_experts(self.layer, experts)
         for projection in PROJECTIONS:
-            for expert in experts:
-                self._record_input_scale(
-                    projection, rows[expert][projection]["input_global_scale"]
-                )
+            if self.formats[projection] == "nvfp4":
+                for expert in experts:
+                    self._record_input_scale(
+                        projection, rows[expert][projection]["input_global_scale"]
+                    )
             for part in self.tensors[projection]:
                 self.tensors[projection][part] = mx.stack(
                     [rows[expert][projection][part] for expert in experts]
@@ -248,7 +252,15 @@ def _expert_module(pool: ExpertPool):
             """Compute down-projection of ReLU2 up-projection by slot ID."""
             x = mx.expand_dims(x, (-2, -3))
 
-            def qmm(value, projection):
+            def project(value, projection):
+                if pool.formats[projection] == "bf16":
+                    weights = pool.tensors[projection]["weight"]
+                    if mx.default_device() == mx.cpu:
+                        return value @ weights[slot_indices].swapaxes(-1, -2)
+                    return mx.gather_mm(
+                        value, weights.swapaxes(-1, -2), rhs_indices=slot_indices,
+                        sorted_indices=False,
+                    )
                 return _nvfp4_qmm(
                     value,
                     pool.tensors[projection],
@@ -256,7 +268,7 @@ def _expert_module(pool: ExpertPool):
                     slot_indices,
                 )
 
-            return qmm(nn.relu2(qmm(x, "up_proj")), "down_proj").squeeze(-2)
+            return project(nn.relu2(project(x, "up_proj")), "down_proj").squeeze(-2)
 
         def __call__(self, x, indices):
             """Execute direct resident slots or populate and remap a stream cache."""
