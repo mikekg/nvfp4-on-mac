@@ -16,7 +16,7 @@ from .runtime import select_expert_mode
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run original NVFP4 Nemotron-H shards in the ModelOpt layout"
+        description="Run original ModelOpt-layout NVFP4 shards on MLX"
     )
     parser.add_argument("--model", required=True, help="local Hugging Face checkpoint directory")
     parser.add_argument("--prompt", default="Hello", help="one user message")
@@ -71,6 +71,9 @@ def main(argv=None) -> None:
     )
     compile_experts = args.compile and bool(index.moe_layers)
     summary["expert_mode"] = expert_mode
+    summary["format"] = index.quant_algo or index.config.get(
+        "torch_dtype", "unknown"
+    )
     summary["compile"] = compile_experts
     summary["runs"] = args.runs
     summary["expert_stats"] = args.expert_stats

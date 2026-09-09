@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Nemotron-H loader for resident or SSD-paged ModelOpt-layout NVFP4 experts."""
+"""Resident or SSD-paged inference for ModelOpt-layout NVFP4 checkpoints."""
 
 from __future__ import annotations
 
@@ -308,11 +308,13 @@ def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
     return StaticNVFP4Linear()
 
 
-def _resident_sanitizer(pools: dict[int, ExpertPool]):
+def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
     import mlx.core as mx
     from mlx.utils import tree_unflatten
 
     def sanitize(model, weights):
+        if base_sanitize is not None:
+            weights = base_sanitize(model, weights)
         for layer, pool in pools.items():
             model.backbone.layers[layer].mixer.switch_mlp = _expert_module(pool)
 
@@ -405,7 +407,7 @@ def load_streaming_model(
     """Load resident weights and install direct-from-source expert pools."""
     import mlx.core as mx
     from mlx_lm import load
-    from mlx_lm.models import nemotron_h
+    from mlx_lm.models import llama, nemotron_h
 
     if mx.default_device() == mx.gpu and "global_scale" not in (
         mx.gather_qmm.__doc__ or ""
@@ -417,6 +419,7 @@ def load_streaming_model(
 
     model_dir = Path(model_dir).resolve()
     index = ModelOptIndex(model_dir)
+    model_module = llama if index.model_type == "llama" else nemotron_h
     summary = index.validate_experts()
     expert_mode = select_expert_mode(
         expert_mode if index.moe_layers else "resident", index.source_bytes
@@ -443,8 +446,10 @@ def load_streaming_model(
             for layer in index.moe_layers
         }
         with _SANITIZER_LOCK:
-            previous = nemotron_h.Model.sanitize
-            nemotron_h.Model.sanitize = _resident_sanitizer(pools)
+            previous = model_module.Model.sanitize
+            model_module.Model.sanitize = _resident_sanitizer(
+                pools, previous if index.model_type == "llama" else None
+            )
             try:
                 model, tokenizer = load(
                     str(model_dir),
@@ -453,7 +458,7 @@ def load_streaming_model(
                     model_config={"num_hidden_layers": index.num_layers},
                 )
             finally:
-                nemotron_h.Model.sanitize = previous
+                model_module.Model.sanitize = previous
 
         mx.eval(model.parameters())
         if expert_mode == "resident":
