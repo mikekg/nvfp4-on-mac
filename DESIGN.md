@@ -98,10 +98,10 @@ For checkpoints with routed experts, `--expert-mode resident` and
 
 ## Dense-only checkpoints
 
-A checkpoint with no `E` layers has no routed experts to cache or stream. All
-weights are loaded into unified memory, so the runtime reports resident mode
-and builds no `ExpertPool` objects. The loader keeps NVFP4 weights packed,
-converts FP8 weights to BF16, and leaves BF16 weights unchanged.
+A Nemotron-H or Llama checkpoint with no routed experts has nothing to cache or
+stream. All weights are loaded into unified memory, so the runtime reports
+resident mode and builds no `ExpertPool` objects. The loader keeps NVFP4 weights
+packed, converts FP8 weights to BF16, and leaves BF16 weights unchanged.
 
 Expert-cache budgets, workers, and statistics have no work to perform for a
 dense-only checkpoint. `--compile` currently compiles only routed-expert
@@ -159,8 +159,9 @@ loaded.
 
 ## Scope
 
-The loader supports dense, MoE, and mixed `model_type=nemotron_h` checkpoints
-declared as `NVFP4` or `MIXED_PRECISION`, plus dense-only `FP8` checkpoints.
-Routed experts must use the NVFP4 tensor layout. Static FP8 weights are expanded
-to BF16 once while loading; BF16 weights retain their checkpoint dtype. The
-loader reads checkpoint shards in place and never rewrites the checkpoint.
+The loader supports dense, MoE, and mixed `model_type=nemotron_h` checkpoints,
+plus dense `model_type=llama` checkpoints. Metadata may declare `NVFP4`,
+`MIXED_PRECISION`, or `FP8`; routed experts must use the NVFP4 tensor layout.
+Static FP8 weights are expanded to BF16 once while loading, and BF16 weights
+retain their checkpoint dtype. The loader reads checkpoint shards in place and
+never rewrites the checkpoint.

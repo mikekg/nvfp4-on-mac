@@ -222,6 +222,35 @@ def run(device) -> None:
         )
         assert ModelOptIndex(dense_path).moe_layers == ()
 
+        llama_path = Path(tmp) / "llama"
+        llama_path.mkdir()
+        (llama_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "llama",
+                    "num_hidden_layers": 32,
+                    "quantization_config": {"quant_algo": "NVFP4"},
+                }
+            )
+        )
+        mx.save_safetensors(
+            str(llama_path / "model-00001-of-00001.safetensors"),
+            {"model.embed_tokens.weight": mx.ones((1,))},
+        )
+        llama_index = ModelOptIndex(llama_path)
+        assert llama_index.num_layers == 32 and llama_index.moe_layers == ()
+
+        (llama_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "llama",
+                    "num_hidden_layers": 32,
+                    "torch_dtype": "bfloat16",
+                }
+            )
+        )
+        assert ModelOptIndex(llama_path).quant_algo == ""
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

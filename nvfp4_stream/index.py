@@ -49,7 +49,7 @@ class TensorLoc:
 
 
 class ModelOptIndex:
-    """Byte-range index for an unmodified sharded ModelOpt checkpoint."""
+    """Byte-range index for an unmodified sharded checkpoint."""
 
     def __init__(self, model_dir: str | Path):
         self.model_dir = Path(model_dir).resolve()
@@ -57,20 +57,23 @@ class ModelOptIndex:
         if not config_path.is_file():
             raise FileNotFoundError(f"missing {config_path}")
         self.config = json.loads(config_path.read_text())
-        if self.config.get("model_type") != "nemotron_h":
-            raise ValueError("this adapter only supports model_type=nemotron_h")
+        self.model_type = self.config.get("model_type")
+        if self.model_type not in {"llama", "nemotron_h"}:
+            raise ValueError("this adapter only supports Llama and Nemotron-H")
         hf_quant_path = self.model_dir / "hf_quant_config.json"
         hf_quant = (
             json.loads(hf_quant_path.read_text()) if hf_quant_path.is_file() else {}
         )
-        quant_algo = (
+        self.quant_algo = (
             hf_quant.get("quantization", {}).get("quant_algo")
             or (self.config.get("quantization_config") or {}).get("quant_algo")
             or ""
         ).upper()
-        if quant_algo not in {"NVFP4", "MIXED_PRECISION", "FP8"}:
+        if self.quant_algo not in {"NVFP4", "MIXED_PRECISION", "FP8"} and not (
+            self.model_type == "llama" and not self.quant_algo
+        ):
             raise ValueError(
-                f"unsupported quantization algorithm: {quant_algo or 'none'}"
+                f"unsupported quantization algorithm: {self.quant_algo or 'none'}"
             )
         files = sorted(glob.glob(str(self.model_dir / "model*.safetensors")))
         if not files:
@@ -99,15 +102,19 @@ class ModelOptIndex:
             self._read_header(filename)
         self.source_bytes = sum(tensor.nbytes for tensor in self.tensors.values())
 
-        pattern = self.config.get("hybrid_override_pattern") or self.config.get(
-            "layers_block_type"
-        )
-        if not pattern:
-            raise ValueError("config has no layer pattern")
-        self.num_layers = len(pattern)
-        self.moe_layers = tuple(
-            i for i, kind in enumerate(pattern) if kind in ("E", "moe")
-        )
+        if self.model_type == "llama":
+            self.num_layers = int(self.config["num_hidden_layers"])
+            self.moe_layers = ()
+        else:
+            pattern = self.config.get("hybrid_override_pattern") or self.config.get(
+                "layers_block_type"
+            )
+            if not pattern:
+                raise ValueError("config has no layer pattern")
+            self.num_layers = len(pattern)
+            self.moe_layers = tuple(
+                i for i, kind in enumerate(pattern) if kind in ("E", "moe")
+            )
         self.num_experts = (
             int(self.config["n_routed_experts"]) if self.moe_layers else 0
         )

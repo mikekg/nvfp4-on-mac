@@ -18,10 +18,9 @@ version.
 
 ## What this is
 
-`nvfp4_stream` is an adapter for the Nemotron-H checkpoint layout (`model_type:
-nemotron_h` in `config.json`) — it isn't restricted to one specific model
-size, but it is restricted to that architecture family. It reads a model's
-NVFP4 shards in the ModelOpt layout directly from the source safetensors files.
+`nvfp4_stream` reads Hugging Face safetensors directly for Nemotron-H and dense
+Llama checkpoints. It keeps NVFP4 packed, expands FP8 to BF16 in memory, and
+loads BF16 unchanged. It is not restricted to one specific model size.
 When the checkpoint fits in unified memory, all experts are loaded before
 generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
 of routed experts). No model file is rewritten, no weight is requantized. It
@@ -30,12 +29,6 @@ runs on the MLX Metal kernel's per-expert NVFP4 `global_scale` support from
 install` builds current MLX `main` until the required kernel appears
 in a release. See [DESIGN.md](DESIGN.md) for the loader, resident mode, and
 streaming expert-cache design.
-
-The Nemotron-H family is the first target, not the only intended one and adding
-support for other models should be straightforward: Today, `index.py` hard-checks 
-`model_type == "nemotron_h"` and its tensor paths are Nemotron-H's own naming, so 
-it does not read other architectures yet.  Extending it to other NVFP4 checkpoint 
-layouts should be straightforward, though.
 
 ## Prerequisites
 
@@ -69,6 +62,12 @@ variable, so another NVFP4 checkpoint works the same way:
 
 ```sh
 MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 make all
+```
+
+Dense Llama checkpoints use the same resident path:
+
+```sh
+MODEL_ID=nvidia/Llama-3.1-8B-Instruct-NVFP4 make all
 ```
 
 Nano 30B is also `model_type: nemotron_h`, so the adapter reads its expert
