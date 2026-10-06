@@ -19,8 +19,8 @@ version.
 ## What this is
 
 `nvfp4_stream` reads Hugging Face safetensors directly for Nemotron-H and dense
-Llama checkpoints. It keeps NVFP4 packed, expands FP8 to BF16 in memory, and
-loads BF16 unchanged. It is not restricted to one specific model size.
+Llama and Qwen2 checkpoints. It keeps NVFP4 packed, expands FP8 to BF16 in memory,
+and loads BF16 unchanged. It is not restricted to one specific model size.
 When the checkpoint fits in unified memory, all experts are loaded before
 generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
 of routed experts). No model file is rewritten, no weight is requantized. It

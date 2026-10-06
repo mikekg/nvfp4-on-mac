@@ -271,6 +271,19 @@ def run(device) -> None:
         )
         assert ModelOptIndex(llama_path).quant_algo == ""
 
+        (llama_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen2",
+                    "num_hidden_layers": 36,
+                    "torch_dtype": "bfloat16",
+                }
+            )
+        )
+        qwen_index = ModelOptIndex(llama_path)
+        assert qwen_index.num_layers == 36 and qwen_index.moe_layers == ()
+        assert qwen_index.quant_algo == ""
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

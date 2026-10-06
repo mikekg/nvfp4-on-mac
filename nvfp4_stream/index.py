@@ -59,8 +59,8 @@ class ModelOptIndex:
             raise FileNotFoundError(f"missing {config_path}")
         self.config = json.loads(config_path.read_text())
         self.model_type = self.config.get("model_type")
-        if self.model_type not in {"llama", "nemotron_h"}:
-            raise ValueError("this adapter only supports Llama and Nemotron-H")
+        if self.model_type not in {"llama", "qwen2", "nemotron_h"}:
+            raise ValueError("this adapter only supports Llama, Qwen2, and Nemotron-H")
         hf_quant_path = self.model_dir / "hf_quant_config.json"
         hf_quant = (
             json.loads(hf_quant_path.read_text()) if hf_quant_path.is_file() else {}
@@ -71,7 +71,7 @@ class ModelOptIndex:
             or ""
         ).upper()
         if self.quant_algo not in {"NVFP4", "MIXED_PRECISION", "FP8"} and not (
-            self.model_type == "llama" and not self.quant_algo
+            self.model_type in {"llama", "qwen2"} and not self.quant_algo
         ):
             raise ValueError(
                 f"unsupported quantization algorithm: {self.quant_algo or 'none'}"
@@ -103,7 +103,7 @@ class ModelOptIndex:
             self._read_header(filename)
         self.source_bytes = sum(tensor.nbytes for tensor in self.tensors.values())
 
-        if self.model_type == "llama":
+        if self.model_type in {"llama", "qwen2"}:
             self.num_layers = int(self.config["num_hidden_layers"])
             self.moe_layers = ()
         else:

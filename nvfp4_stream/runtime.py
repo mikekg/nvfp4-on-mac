@@ -424,7 +424,7 @@ def load_streaming_model(
     """Load common weights and prepare dense or pool-backed MoE inference."""
     import mlx.core as mx
     from mlx_lm import load
-    from mlx_lm.models import llama, nemotron_h
+    from mlx_lm.models import llama, nemotron_h, qwen2
 
     if mx.default_device() == mx.gpu and "global_scale" not in (
         mx.gather_qmm.__doc__ or ""
@@ -435,7 +435,11 @@ def load_streaming_model(
         )
 
     model_dir = index.model_dir
-    model_module = llama if index.model_type == "llama" else nemotron_h
+    model_module = {
+        "llama": llama,
+        "qwen2": qwen2,
+        "nemotron_h": nemotron_h,
+    }[index.model_type]
     summary = index.expert_summary
     expert_mode = select_expert_mode(
         expert_mode if index.moe_layers else "resident", index.source_bytes
@@ -464,7 +468,7 @@ def load_streaming_model(
         with _SANITIZER_LOCK:
             previous = model_module.Model.sanitize
             model_module.Model.sanitize = _resident_sanitizer(
-                pools, previous if index.model_type == "llama" else None
+                pools, previous if index.model_type != "nemotron_h" else None
             )
             try:
                 model, tokenizer = load(

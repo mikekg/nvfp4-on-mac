@@ -162,8 +162,8 @@ loaded.
 ## Scope
 
 The loader supports dense, MoE, and mixed `model_type=nemotron_h` checkpoints,
-plus dense `model_type=llama` checkpoints. Metadata may declare `NVFP4`,
-`MIXED_PRECISION`, or `FP8`; routed experts must use the NVFP4 tensor layout.
+plus dense `model_type=llama` and `model_type=qwen2` checkpoints. Metadata may
+declare `NVFP4`, `MIXED_PRECISION`, or `FP8`; routed experts must use the NVFP4 tensor layout.
 Static FP8 weights are expanded to BF16 once while loading, and BF16 weights
 retain their checkpoint dtype. The loader reads checkpoint shards in place and
 never rewrites the checkpoint.
