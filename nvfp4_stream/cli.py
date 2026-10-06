@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from .index import ModelOptIndex
-from .runtime import select_expert_mode
+from .runtime import routed_mlp, select_expert_mode
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -121,7 +121,7 @@ def main(argv=None) -> None:
         load_seconds = time.perf_counter() - started
         if compile_experts:
             for layer, pool in pools.items():
-                expert = model.backbone.layers[layer].mixer.switch_mlp
+                expert = routed_mlp(model, layer).switch_mlp
                 expert._forward = mx.compile(
                     expert._forward, inputs=pool.tensors
                 )

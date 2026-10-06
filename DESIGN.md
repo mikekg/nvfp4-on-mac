@@ -167,3 +167,9 @@ declare `NVFP4`, `MIXED_PRECISION`, or `FP8`; routed experts must use the NVFP4 
 Static FP8 weights are expanded to BF16 once while loading, and BF16 weights
 retain their checkpoint dtype. The loader reads checkpoint shards in place and
 never rewrites the checkpoint.
+
+NVIDIA's `qwen3_5_moe` NVFP4 export is supported for text generation. Its
+three expert projections use SwiGLU and the same cache and disk reader.
+Per-module `W4A16_NVFP4` metadata disables activation rounding while keeping
+weights packed; `NVFP4` retains the activation-rounding path. Qwen's attention,
+recurrent state, shared experts, and checkpoint sanitization use MLX-LM.

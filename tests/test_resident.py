@@ -194,8 +194,93 @@ def run(device) -> None:
                     "static NVFP4 result mismatch: "
                     f"{static_result} != {static_expected}"
                 )
+            static._round_activations = False
+            static_result = static(x)
+            static_expected = x @ dense[0]["up_proj"].T
+            mx.eval(static_result, static_expected)
+            assert mx.allclose(static_result, static_expected, rtol=3e-2, atol=1).item()
         finally:
             reader.close()
+
+        qwen_path = Path(tmp) / "qwen-moe"
+        qwen_path.mkdir()
+        (qwen_path / "config.json").write_text(json.dumps({
+            "model_type": "qwen3_5_moe",
+            "text_config": {
+                "num_hidden_layers": 1, "num_experts": experts,
+                "num_experts_per_tok": 1,
+            },
+        }))
+        (qwen_path / "hf_quant_config.json").write_text(json.dumps({
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.language_model.layers.0.mlp.experts": {
+                        "quant_algo": "W4A16_NVFP4",
+                    },
+                },
+            },
+        }))
+        qwen_source = {
+            key.replace("backbone.layers.0.mixer", "model.language_model.layers.0.mlp"): value
+            for key, value in source.items()
+        }
+        for expert in range(experts):
+            for part in ("weight", "weight_scale", "weight_scale_2", "input_scale"):
+                qwen_source[f"model.language_model.layers.0.mlp.experts.{expert}.gate_proj.{part}"] = (
+                    source[f"backbone.layers.0.mixer.experts.{(expert + 1) % experts}.up_proj.{part}"]
+                )
+            # W4A16 must ignore differing activation scales across experts.
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                qwen_source[f"model.language_model.layers.0.mlp.experts.{expert}.{projection}.input_scale"] = (
+                    mx.array([expert + 1.0])
+                )
+        mx.save_safetensors(str(qwen_path / "model.safetensors"), qwen_source)
+        qwen_index = ModelOptIndex(qwen_path)
+        assert set(qwen_index.expert_formats[0].values()) == {"nvfp4_w4a16"}
+        qwen_reader = ExpertReader(qwen_index)
+        try:
+            x = mx.random.normal((1, 2, dims), dtype=mx.bfloat16)
+            indices = mx.array([[[0], [1]]], dtype=mx.uint32)
+            expected = []
+            for token, expert in enumerate((0, 1)):
+                value = x[:, token:token + 1]
+                gate = value @ dense[(expert + 1) % experts]["up_proj"].T
+                up = value @ dense[expert]["up_proj"].T
+                expected.append((nn.silu(gate) * up) @ dense[expert]["down_proj"].T)
+            expected = mx.expand_dims(mx.concatenate(expected, axis=1), 2)
+            pool = ExpertPool(qwen_index, qwen_reader, layer=0, slots=1)
+            module = _expert_module(pool)
+            module._forward = mx.compile(module._forward, inputs=pool.tensors)
+            streamed = module(x, indices)
+            mx.eval(streamed, expected)
+            assert mx.allclose(streamed, expected, rtol=3e-2, atol=1).item()
+            assert pool.evictions == 1 and not pool.input_global_scale_arrays
+            resident_pool = ExpertPool(qwen_index, qwen_reader, layer=0, slots=experts)
+            resident_pool.preload_all()
+            reads = qwen_reader.reads
+            resident = _expert_module(resident_pool)(x, indices)
+            mx.eval(resident)
+            assert qwen_reader.reads == reads
+            assert mx.allclose(resident, streamed, rtol=0, atol=0).item()
+        finally:
+            qwen_reader.close()
+
+        quant_path = qwen_path / "hf_quant_config.json"
+        quant_config = json.loads(quant_path.read_text())
+        for layers, message in (
+            ({}, "missing NVFP4 quantization metadata"),
+            ({"model.language_model.layers.0.mlp.experts": {"quant_algo": "FP8"}},
+             "unsupported NVFP4 algorithm"),
+        ):
+            quant_config["quantization"]["quantized_layers"] = layers
+            quant_path.write_text(json.dumps(quant_config))
+            try:
+                ModelOptIndex(qwen_path)
+            except ValueError as error:
+                assert message in str(error)
+            else:
+                raise AssertionError("invalid Qwen quantization metadata was accepted")
 
         prefix = "backbone.layers.0.mixer.experts.1.up_proj"
         for key, replacement in (

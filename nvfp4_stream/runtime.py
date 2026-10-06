@@ -12,7 +12,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from .index import NVFP4_SCALE_DENOM, PROJECTIONS, ModelOptIndex
+from .index import NVFP4_SCALE_DENOM, ModelOptIndex
 from .reader import ExpertReader
 
 
@@ -65,7 +65,7 @@ class ExpertPool:
         self.input_global_scale_arrays = {}
 
         self.tensors = {}
-        for projection in PROJECTIONS:
+        for projection in self.index.projections:
             parts = index.expert_parts(layer, 0, projection)
             weight_shape = parts["weight"].shape
             weight_shape = weight_shape[:-1] + (weight_shape[-1] // 4,)
@@ -97,6 +97,8 @@ class ExpertPool:
         """Record one shared NVFP4 activation scale for a projection."""
         import mlx.core as mx
 
+        if self.formats[projection] == "nvfp4_w4a16":
+            return
         previous = self.input_global_scales.get(projection)
         if previous is not None and previous.tobytes() != value.tobytes():
             raise ValueError(
@@ -147,7 +149,7 @@ class ExpertPool:
         rows = self.reader.read_experts(self.layer, missing)
         for expert in missing:
             slot = self.id_to_slot[expert]
-            for projection in PROJECTIONS:
+            for projection in self.index.projections:
                 row = rows[expert][projection]
                 self._record_input_scale(
                     projection,
@@ -165,7 +167,7 @@ class ExpertPool:
             raise ValueError("resident expert pool needs one slot per expert")
         experts = list(range(self.index.num_experts))
         rows = self.reader.read_experts(self.layer, experts)
-        for projection in PROJECTIONS:
+        for projection in self.index.projections:
             for expert in experts:
                 self._record_input_scale(
                     projection, rows[expert][projection]["input_global_scale"]
@@ -189,26 +191,27 @@ class ExpertPool:
 
 
 def _nvfp4_qmm(value, tensors, input_global_scale, indices):
-    """Apply NVFP4 activation rounding and selected packed-weight projection."""
+    """Apply optional activation rounding and selected NVFP4 weight projection."""
     import mlx.core as mx
 
     output_dtype = value.dtype
-    qvalue, value_scales = mx.quantize(
-        value,
-        group_size=16,
-        bits=4,
-        mode="nvfp4",
-        global_scale=input_global_scale,
-    )
-    value = mx.dequantize(
-        qvalue,
-        value_scales,
-        group_size=16,
-        bits=4,
-        mode="nvfp4",
-        global_scale=input_global_scale,
-        dtype=value.dtype,
-    )
+    if input_global_scale is not None:
+        qvalue, value_scales = mx.quantize(
+            value,
+            group_size=16,
+            bits=4,
+            mode="nvfp4",
+            global_scale=input_global_scale,
+        )
+        value = mx.dequantize(
+            qvalue,
+            value_scales,
+            group_size=16,
+            bits=4,
+            mode="nvfp4",
+            global_scale=input_global_scale,
+            dtype=value.dtype,
+        )
     kwargs = (
         {"global_scale": tensors["global_scale"]}
         if mx.default_device() == mx.gpu
@@ -233,6 +236,12 @@ def _nvfp4_qmm(value, tensors, input_global_scale, indices):
     return value
 
 
+def routed_mlp(model, layer: int):
+    """Locate one model layer's routed MLP."""
+    block = model.layers[layer]
+    return block.mlp if model.model_type == "qwen3_5_moe" else block.mixer
+
+
 def _expert_module(pool: ExpertPool):
     """Build a routed MLP that reads weights from one expert pool."""
     import mlx.core as mx
@@ -245,18 +254,23 @@ def _expert_module(pool: ExpertPool):
             self._pool = pool
 
         def _forward(self, x, slot_indices):
-            """Compute down-projection of ReLU2 up-projection by slot ID."""
+            """Compute the routed ReLU2 or SwiGLU MLP by slot ID."""
             x = mx.expand_dims(x, (-2, -3))
 
             def qmm(value, projection):
                 return _nvfp4_qmm(
                     value,
                     pool.tensors[projection],
-                    pool.input_global_scale_arrays[projection],
+                    pool.input_global_scale_arrays.get(projection),
                     slot_indices,
                 )
 
-            return qmm(nn.relu2(qmm(x, "up_proj")), "down_proj").squeeze(-2)
+            up = qmm(x, "up_proj")
+            hidden = (
+                nn.silu(qmm(x, "gate_proj")) * up
+                if "gate_proj" in pool.tensors else nn.relu2(up)
+            )
+            return qmm(hidden, "down_proj").squeeze(-2)
 
         def __call__(self, x, indices):
             """Execute direct resident slots or populate and remap a stream cache."""
@@ -286,7 +300,7 @@ def _expert_module(pool: ExpertPool):
     return ExpertSwitchMLP()
 
 
-def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
+def _static_nvfp4_module(weight_shape, scale_shape, bias: bool, round_activations=True):
     """Build a one-entry resident NVFP4 linear for a non-routed weight."""
     import mlx.core as mx
     import mlx.nn as nn
@@ -298,7 +312,9 @@ def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
             self.weight = mx.zeros((1,) + tuple(weight_shape), dtype=mx.uint32)
             self.scales = mx.zeros((1,) + tuple(scale_shape), dtype=mx.uint8)
             self.global_scale = mx.ones((1,), dtype=mx.float32)
-            self.input_global_scale = mx.ones((), dtype=mx.float32)
+            self._round_activations = round_activations
+            if round_activations:
+                self.input_global_scale = mx.ones((), dtype=mx.float32)
             if bias:
                 self.bias = mx.zeros((weight_shape[0],))
 
@@ -313,7 +329,7 @@ def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
                     "scales": self.scales,
                     "global_scale": self.global_scale,
                 },
-                self.input_global_scale,
+                self.input_global_scale if self._round_activations else None,
                 indices,
             ).squeeze(-2).squeeze(-2)
             if "bias" in self:
@@ -323,23 +339,23 @@ def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
     return StaticNVFP4Linear()
 
 
-def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
+def _resident_sanitizer(index: ModelOptIndex, pools: dict[int, ExpertPool], base_sanitize=None):
     """Build the temporary in-memory sanitizer for dense and MoE loading."""
     import mlx.core as mx
     from mlx.utils import tree_unflatten
 
     def sanitize(model, weights):
         """Adapt lazy in-memory weights and modules to the runtime layout."""
-        if base_sanitize is not None:
-            weights = base_sanitize(model, weights)
-        for layer, pool in pools.items():
-            model.backbone.layers[layer].mixer.switch_mlp = _expert_module(pool)
-
         weights = {
             key: value
             for key, value in weights.items()
-            if not key.startswith("mtp.") and ".mixer.experts." not in key
+            if not key.startswith("mtp.") and ".experts." not in key
         }
+
+        if base_sanitize is not None:
+            weights = base_sanitize(model, weights)
+        for layer, pool in pools.items():
+            routed_mlp(model, layer).switch_mlp = _expert_module(pool)
 
         # The authoritative Nemotron implementation routes in FP32. Keeping a
         # BF16 gate matmul can change the 22 selected experts out of 512.
@@ -355,6 +371,12 @@ def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
             weight_key = f"{static_prefix}.weight"
             scale_key = f"{static_prefix}.weight_scale"
             input_key = f"{static_prefix}.input_scale"
+            source_prefix = static_prefix
+            if index.model_type == "qwen3_5_moe":
+                source_prefix = source_prefix.replace(
+                    "language_model.model", "model.language_model", 1
+                ).removeprefix("language_model.")
+            round_activations = index.nvfp4_format(source_prefix) == "nvfp4"
             weight = weights.pop(weight_key).view(mx.uint32)
             scales = weights.pop(scale_key).view(mx.uint8)
             replacements.append(
@@ -364,6 +386,7 @@ def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
                         weight.shape,
                         scales.shape,
                         f"{static_prefix}.bias" in weights,
+                        round_activations,
                     ),
                 )
             )
@@ -373,10 +396,11 @@ def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
                 weights.pop(static_scale2).astype(mx.float32).reshape((1,))
                 * NVFP4_SCALE_DENOM
             )
-            weights[f"{static_prefix}.input_global_scale"] = (
-                weights.pop(input_key).astype(mx.float32).reshape(())
-                * NVFP4_SCALE_DENOM
-            )
+            input_scale = weights.pop(input_key)
+            if round_activations:
+                weights[f"{static_prefix}.input_global_scale"] = (
+                    input_scale.astype(mx.float32).reshape(()) * NVFP4_SCALE_DENOM
+                )
         if replacements:
             model.update_modules(tree_unflatten(replacements))
 
@@ -424,7 +448,7 @@ def load_streaming_model(
     """Load common weights and prepare dense or pool-backed MoE inference."""
     import mlx.core as mx
     from mlx_lm import load
-    from mlx_lm.models import llama, nemotron_h, qwen2
+    from mlx_lm.models import llama, nemotron_h, qwen2, qwen3_5_moe
 
     if mx.default_device() == mx.gpu and "global_scale" not in (
         mx.gather_qmm.__doc__ or ""
@@ -438,6 +462,7 @@ def load_streaming_model(
     model_module = {
         "llama": llama,
         "qwen2": qwen2,
+        "qwen3_5_moe": qwen3_5_moe,
         "nemotron_h": nemotron_h,
     }[index.model_type]
     summary = index.expert_summary
@@ -468,7 +493,7 @@ def load_streaming_model(
         with _SANITIZER_LOCK:
             previous = model_module.Model.sanitize
             model_module.Model.sanitize = _resident_sanitizer(
-                pools, previous if index.model_type != "nemotron_h" else None
+                index, pools, previous if index.model_type != "nemotron_h" else None
             )
             try:
                 model, tokenizer = load(

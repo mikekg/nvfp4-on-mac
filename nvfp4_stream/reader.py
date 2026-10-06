@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from .index import NVFP4_SCALE_DENOM, PROJECTIONS, ModelOptIndex, TensorLoc
+from .index import NVFP4_SCALE_DENOM, ModelOptIndex, TensorLoc
 
 
 class ExpertReader:
@@ -112,7 +112,7 @@ class ExpertReader:
         requests = []
         locations = {}
         for expert in experts:
-            for projection in PROJECTIONS:
+            for projection in self.index.projections:
                 parts = self.index.expert_parts(layer, expert, projection)
                 for part, loc in parts.items():
                     key = (expert, projection, part)
@@ -122,7 +122,7 @@ class ExpertReader:
         output = {}
         for expert in experts:
             output[expert] = {}
-            for projection in PROJECTIONS:
+            for projection in self.index.projections:
                 key = (expert, projection)
                 parts = {
                     "weight": self._weight_np(

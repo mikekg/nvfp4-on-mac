@@ -33,7 +33,6 @@ DTYPE_SIZE = {
     "F64": 8,
 }
 
-PROJECTIONS = ("up_proj", "down_proj")
 SOURCE_PARTS = ("weight", "weight_scale", "weight_scale_2", "input_scale")
 NVFP4_SCALE_DENOM = 6.0 * 448.0
 
@@ -59,12 +58,13 @@ class ModelOptIndex:
             raise FileNotFoundError(f"missing {config_path}")
         self.config = json.loads(config_path.read_text())
         self.model_type = self.config.get("model_type")
-        if self.model_type not in {"llama", "qwen2", "nemotron_h"}:
-            raise ValueError("this adapter only supports Llama, Qwen2, and Nemotron-H")
+        if self.model_type not in {"llama", "qwen2", "nemotron_h", "qwen3_5_moe"}:
+            raise ValueError(f"unsupported model type: {self.model_type}")
         hf_quant_path = self.model_dir / "hf_quant_config.json"
         hf_quant = (
             json.loads(hf_quant_path.read_text()) if hf_quant_path.is_file() else {}
         )
+        self.quantized_layers = hf_quant.get("quantization", {}).get("quantized_layers", {})
         self.quant_algo = (
             hf_quant.get("quantization", {}).get("quant_algo")
             or (self.config.get("quantization_config") or {}).get("quant_algo")
@@ -103,7 +103,16 @@ class ModelOptIndex:
             self._read_header(filename)
         self.source_bytes = sum(tensor.nbytes for tensor in self.tensors.values())
 
-        if self.model_type in {"llama", "qwen2"}:
+        self.projections = ("up_proj", "down_proj")
+        config = self.config
+        if self.model_type == "qwen3_5_moe":
+            config = self.config["text_config"]
+            self.projections = ("gate_proj", "up_proj", "down_proj")
+            self.num_layers = int(config["num_hidden_layers"])
+            if config.get("mlp_only_layers") or config.get("decoder_sparse_step", 1) != 1:
+                raise ValueError("Qwen support requires routed experts in every layer")
+            self.moe_layers = tuple(range(self.num_layers))
+        elif self.model_type in {"llama", "qwen2"}:
             self.num_layers = int(self.config["num_hidden_layers"])
             self.moe_layers = ()
         else:
@@ -117,9 +126,10 @@ class ModelOptIndex:
                 i for i, kind in enumerate(pattern) if kind in ("E", "moe")
             )
         self.num_experts = (
-            int(self.config["n_routed_experts"]) if self.moe_layers else 0
+            int(config["num_experts" if self.model_type == "qwen3_5_moe" else "n_routed_experts"])
+            if self.moe_layers else 0
         )
-        self.top_k = int(self.config["num_experts_per_tok"]) if self.moe_layers else 0
+        self.top_k = int(config["num_experts_per_tok"]) if self.moe_layers else 0
         self.expert_formats: dict[int, dict[str, str]] = {}
         self.expert_summary = self._validate_experts()
 
@@ -148,10 +158,21 @@ class ModelOptIndex:
                 filename, data_start + begin, end - begin, dtype, shape, name
             )
 
-    @staticmethod
-    def expert_prefix(layer: int, expert: int, projection: str) -> str:
+    def expert_prefix(self, layer: int, expert: int, projection: str) -> str:
         """Build the checkpoint prefix for one routed expert projection."""
+        if self.model_type == "qwen3_5_moe":
+            return f"model.language_model.layers.{layer}.mlp.experts.{expert}.{projection}"
         return f"backbone.layers.{layer}.mixer.experts.{expert}.{projection}"
+
+    def nvfp4_format(self, prefix: str) -> str:
+        """Resolve a projection's NVFP4 activation policy from checkpoint metadata."""
+        key = prefix.split(".experts.")[0] + ".experts" if ".experts." in prefix else prefix
+        if self.model_type == "qwen3_5_moe" and key not in self.quantized_layers:
+            raise ValueError(f"{prefix}: missing NVFP4 quantization metadata")
+        algo = self.quantized_layers.get(key, {}).get("quant_algo", "NVFP4")
+        if algo not in {"NVFP4", "W4A16_NVFP4"}:
+            raise ValueError(f"{prefix}: unsupported NVFP4 algorithm: {algo}")
+        return "nvfp4_w4a16" if algo == "W4A16_NVFP4" else "nvfp4"
 
     def expert_parts(
         self, layer: int, expert: int, projection: str
@@ -164,9 +185,8 @@ class ModelOptIndex:
             if f"{prefix}.{part}" in self.tensors
         }
 
-    @staticmethod
-    def _expert_format(parts: dict[str, TensorLoc]) -> str:
-        """Validate one projection's stored representation and record its format."""
+    def _expert_format(self, parts: dict[str, TensorLoc]) -> str:
+        """Validate one projection and resolve its NVFP4 computation format."""
         if set(parts) != set(SOURCE_PARTS):
             raise ValueError("incomplete NVFP4 expert tensor set")
         weight = parts["weight"]
@@ -183,13 +203,13 @@ class ModelOptIndex:
             scale = parts[part]
             if scale.dtype != "F32" or scale.nbytes != 4:
                 raise ValueError(f"{scale.name}: expected one F32 scale")
-        return "nvfp4"
+        return self.nvfp4_format(weight.name.removesuffix(".weight"))
 
     def expert_bytes(self, layer: int) -> int:
         """Count source bytes for one representative routed expert in a layer."""
         return sum(
             loc.nbytes
-            for projection in PROJECTIONS
+            for projection in self.projections
             for loc in self.expert_parts(layer, 0, projection).values()
         )
 
@@ -197,7 +217,7 @@ class ModelOptIndex:
         """Count runtime slot bytes for one routed expert in a layer."""
         return sum(
             loc.nbytes
-            for projection in PROJECTIONS
+            for projection in self.projections
             for part, loc in self.expert_parts(layer, 0, projection).items()
             if part != "input_scale"
         )
@@ -208,7 +228,7 @@ class ModelOptIndex:
         for layer in self.moe_layers:
             self.expert_formats[layer] = {}
             shapes = {}
-            for projection in PROJECTIONS:
+            for projection in self.projections:
                 parts = self.expert_parts(layer, 0, projection)
                 format = self._expert_format(parts)
                 self.expert_formats[layer][projection] = format
@@ -224,6 +244,8 @@ class ModelOptIndex:
                         raise ValueError(f"{prefix}: expert tensor layouts differ")
             if shapes["up_proj"] != shapes["down_proj"][::-1]:
                 raise ValueError(f"layer {layer}: expert projection shapes disagree")
+            if "gate_proj" in shapes and shapes["gate_proj"] != shapes["up_proj"]:
+                raise ValueError(f"layer {layer}: gate/up projection shapes disagree")
             total += self.expert_bytes(layer) * self.num_experts
         return {
             "layers": len(self.moe_layers),

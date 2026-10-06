@@ -21,6 +21,8 @@ version.
 `nvfp4_stream` reads Hugging Face safetensors directly for Nemotron-H and dense
 Llama and Qwen2 checkpoints. It keeps NVFP4 packed, expands FP8 to BF16 in memory,
 and loads BF16 unchanged. It is not restricted to one specific model size.
+NVIDIA's Qwen3.6-35B-A3B-NVFP4 export (`qwen3_5_moe`) uses the same expert
+cache with SwiGLU and W4A16 computation; this adapter runs its text model.
 When the checkpoint fits in unified memory, all experts are loaded before
 generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
 of routed experts). No model file is rewritten, no weight is requantized. It
