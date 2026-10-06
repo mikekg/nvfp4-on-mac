@@ -25,27 +25,22 @@ When the checkpoint fits in unified memory, all experts are loaded before
 generation; larger models use an SSD-backed expert cache (Super 120B has 59 GB
 of routed experts). No model file is rewritten, no weight is requantized. It
 runs on the MLX Metal kernel's per-expert NVFP4 `global_scale` support from
-[ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458). `make
-install` builds current MLX `main` until the required kernel appears
-in a release. See [DESIGN.md](DESIGN.md) for the loader, resident mode, and
-streaming expert-cache design.
+[ml-explore/mlx#4458](https://github.com/ml-explore/mlx/pull/4458), included in
+MLX 0.32.3. `make install` installs a release wheel. See [DESIGN.md](DESIGN.md)
+for the loader, resident mode, and streaming expert-cache design.
 
 ## Prerequisites
 
 - macOS on Apple Silicon (tested on an M3 Pro, 36 GB unified memory)
-- Xcode Command Line Tools (`xcode-select --install`) — provides `git`,
-  `make`, `clang`, and `cmake`'s build toolchain
+- Xcode Command Line Tools (`xcode-select --install`) — provides `git` and
+  `make`; no local Metal compiler is needed for the MLX release wheel.
 - [Homebrew](https://brew.sh)
-- `cmake`, needed to build MLX from source:
-  ```sh
-  brew install cmake
-  ```
 - `make`, if for some reason it isn't already on your system (Xcode Command
   Line Tools normally provide it):
   ```sh
   brew install make
   ```
-- Python 3.10+
+- Python 3.11+
 - Free disk for the selected checkpoint (~19 GB for Nano, ~80 GB for Super)
 - ~25 GB free unified memory to run it
 
@@ -74,8 +69,8 @@ Nano 30B is also `model_type: nemotron_h`, so the adapter reads its expert
 layout the same way it reads Super's. On the tested 36 GB M3 Pro it runs fully
 resident, using 20.07 GB peak memory and generating at 32.78 tokens/second.
 
-`make all` downloads the selected checkpoint, builds MLX and
-installs the adapter, applies the mlx-lm patches this needs, asks the model
+`make all` downloads the selected checkpoint, installs MLX and
+installs the adapter, applies the mlx-lm final-lookahead patch, asks the model
 for the capital of Austria as a sanity check, then runs the two benchmarks
 below.
 
@@ -137,8 +132,8 @@ Options:
 | Target | Does |
 |---|---|
 | `make download` / `make model` | Downloads the NVFP4 checkpoint from Hugging Face |
-| `make install` | Creates a venv, builds MLX main, and installs mlx-lm and this adapter |
-| `make patch` | Applies the mlx-lm patches this adapter needs |
+| `make install` | Creates a venv and installs release MLX, mlx-lm, and this adapter |
+| `make patch` | Applies the mlx-lm final-lookahead patch |
 | `make test` | Asks the model for the capital of Austria |
 | `make test-compile` | Runs the same test with MLX compilation |
 | `make run` | Runs the interpreted Metal essay `RERUN_INTERPRETED` times and writes the metrics to `interpreted-runs.json` |

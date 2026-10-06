@@ -37,18 +37,20 @@ install: $(VENV)/bin/python3 download
 	@if [ ! -d "$(MLX_LM_DIR)" ]; then \
 		git clone https://github.com/ml-explore/mlx-lm.git $(MLX_LM_DIR); \
 	fi
-	$(PIP) install -q -e $(MLX_LM_DIR) --no-deps
-	@echo "Building MLX main with per-expert NVFP4 global_scale support (this takes a few minutes)..."
-	$(PIP) install -q "git+https://github.com/ml-explore/mlx.git@main"
+	$(PIP) install -q "mlx>=0.32.3"
+	$(PIP) install -q -e $(MLX_LM_DIR)
 	$(PIP) install -q -e . --no-deps
 
 patch:
-	git -C $(MLX_LM_DIR) apply --check patches/mlx-lm-skip-final-lookahead.patch 2>/dev/null && \
-		git -C $(MLX_LM_DIR) apply patches/mlx-lm-skip-final-lookahead.patch || \
-		echo "skip-final-lookahead patch already applied, skipping"
-	git -C $(MLX_LM_DIR) apply --check patches/mlx-lm-cpu-wired-limit-fix.patch 2>/dev/null && \
-		git -C $(MLX_LM_DIR) apply patches/mlx-lm-cpu-wired-limit-fix.patch || \
-		echo "cpu-wired-limit-fix patch already applied, skipping"
+	@patch="$(abspath patches/mlx-lm-skip-final-lookahead.patch)"; \
+		if git -C "$(MLX_LM_DIR)" apply --check "$$patch" 2>/dev/null; then \
+			git -C "$(MLX_LM_DIR)" apply "$$patch" || exit 1; \
+		elif git -C "$(MLX_LM_DIR)" apply --reverse --check "$$patch" 2>/dev/null; then \
+			echo "$$patch already applied, skipping"; \
+		else \
+			git -C "$(MLX_LM_DIR)" apply --check "$$patch"; \
+			exit 1; \
+		fi
 
 test: install patch
 	$(RUN) --model $(MODEL_DIR) --expert-budget-gib $(EXPERT_BUDGET_GIB) \
