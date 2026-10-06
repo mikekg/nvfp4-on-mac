@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resident or SSD-paged inference for ModelOpt-layout NVFP4 checkpoints."""
+"""Adapt static weights and manage routed experts for MLX inference."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import contextlib
 import os
 import threading
 from collections import OrderedDict
-from pathlib import Path
 
 import numpy as np
 
@@ -24,6 +23,7 @@ _RESIDENT_RESERVE_BYTES = 4 << 30
 def select_expert_mode(
     requested: str, source_bytes: int, memory_bytes: int | None = None
 ) -> str:
+    """Resolve an explicit or automatic routed-expert residency mode."""
     if requested not in ("auto", "resident", "stream"):
         raise ValueError(f"invalid expert mode: {requested}")
     if requested != "auto":
@@ -35,7 +35,7 @@ def select_expert_mode(
 
 
 class ExpertPool:
-    """Fixed per-layer slots with protected-step LRU replacement."""
+    """Cache one MoE layer's experts in fixed slots."""
 
     def __init__(
         self,
@@ -50,6 +50,7 @@ class ExpertPool:
         self.index = index
         self.reader = reader
         self.layer = layer
+        self.formats = index.expert_formats[layer]
         self.slots = slots
         self.id_to_slot: OrderedDict[int, int] = OrderedDict()
         self.free = list(range(slots - 1, -1, -1))
@@ -77,11 +78,13 @@ class ExpertPool:
             }
 
     def reset_stats(self) -> None:
+        """Reset per-run counters without changing cache contents or LRU state."""
         self.hits = self.misses = self.evictions = 0
         self.cold_misses = self.capacity_misses = 0
         self._run_accessed_experts.clear()
 
     def evaluate(self) -> None:
+        """Materialize all MLX slot tensors and NVFP4 input-scale scalars."""
         import mlx.core as mx
 
         tensors = [
@@ -91,6 +94,7 @@ class ExpertPool:
         mx.eval(tensors)
 
     def _record_input_scale(self, projection: str, value: np.float32) -> None:
+        """Record one shared NVFP4 activation scale for a projection."""
         import mlx.core as mx
 
         previous = self.input_global_scales.get(projection)
@@ -103,6 +107,7 @@ class ExpertPool:
             self.input_global_scale_arrays[projection] = mx.array(value, mx.float32)
 
     def _allocate(self, expert: int, protected: set[int]) -> int:
+        """Assign an expert to a free or oldest unprotected LRU slot."""
         if self.free:
             slot = self.free.pop()
         else:
@@ -117,6 +122,7 @@ class ExpertPool:
         return slot
 
     def ensure(self, experts: list[int]) -> None:
+        """Ensure requested experts occupy materialized cache slots."""
         if self.expert_stats:
             self._run_accessed_experts.update(experts)
         wanted = set(experts)
@@ -142,16 +148,17 @@ class ExpertPool:
         for expert in missing:
             slot = self.id_to_slot[expert]
             for projection in PROJECTIONS:
+                row = rows[expert][projection]
                 self._record_input_scale(
                     projection,
-                    rows[expert][projection]["input_global_scale"],
+                    row["input_global_scale"],
                 )
-                for part in ("weight", "scales", "global_scale"):
-                    self.tensors[projection][part][slot] = rows[expert][projection][part]
+                for part in self.tensors[projection]:
+                    self.tensors[projection][part][slot] = row[part]
         self.evaluate()
 
     def preload_all(self) -> None:
-        """Load a complete identity-indexed expert bank once."""
+        """Load and materialize a complete identity-indexed expert bank."""
         import mlx.core as mx
 
         if self.slots != self.index.num_experts:
@@ -163,7 +170,7 @@ class ExpertPool:
                 self._record_input_scale(
                     projection, rows[expert][projection]["input_global_scale"]
                 )
-            for part in ("weight", "scales", "global_scale"):
+            for part in self.tensors[projection]:
                 self.tensors[projection][part] = mx.stack(
                     [rows[expert][projection][part] for expert in experts]
                 )
@@ -174,6 +181,7 @@ class ExpertPool:
         self.evaluate()
 
     def remap(self, indices: np.ndarray) -> np.ndarray:
+        """Map host router expert IDs to current unsigned cache-slot IDs."""
         mapped = self.slot_table[indices]
         if (mapped < 0).any():
             raise RuntimeError(f"layer {self.layer}: selected expert is not resident")
@@ -181,6 +189,7 @@ class ExpertPool:
 
 
 def _nvfp4_qmm(value, tensors, input_global_scale, indices):
+    """Apply NVFP4 activation rounding and selected packed-weight projection."""
     import mlx.core as mx
 
     output_dtype = value.dtype
@@ -225,15 +234,18 @@ def _nvfp4_qmm(value, tensors, input_global_scale, indices):
 
 
 def _expert_module(pool: ExpertPool):
+    """Build a routed MLP that reads weights from one expert pool."""
     import mlx.core as mx
     import mlx.nn as nn
 
-    class NVFP4SwitchMLP(nn.Module):
+    class ExpertSwitchMLP(nn.Module):
+        """Run one MoE routed MLP from an expert pool."""
         def __init__(self):
             super().__init__()
             self._pool = pool
 
         def _forward(self, x, slot_indices):
+            """Compute down-projection of ReLU2 up-projection by slot ID."""
             x = mx.expand_dims(x, (-2, -3))
 
             def qmm(value, projection):
@@ -247,6 +259,7 @@ def _expert_module(pool: ExpertPool):
             return qmm(nn.relu2(qmm(x, "up_proj")), "down_proj").squeeze(-2)
 
         def __call__(self, x, indices):
+            """Execute direct resident slots or populate and remap a stream cache."""
             if pool.fully_resident:
                 return self._forward(x, indices.astype(mx.uint32))
             host = np.asarray(indices)
@@ -270,15 +283,16 @@ def _expert_module(pool: ExpertPool):
                 pieces.append(piece)
             return mx.concatenate(pieces, axis=1)
 
-    return NVFP4SwitchMLP()
+    return ExpertSwitchMLP()
 
 
 def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
-    """One resident packed NVFP4 linear with calibrated W4A4 inputs."""
+    """Build a one-entry resident NVFP4 linear for a non-routed weight."""
     import mlx.core as mx
     import mlx.nn as nn
 
     class StaticNVFP4Linear(nn.Module):
+        """Represent one static NVFP4 projection as a one-entry bank."""
         def __init__(self):
             super().__init__()
             self.weight = mx.zeros((1,) + tuple(weight_shape), dtype=mx.uint32)
@@ -289,6 +303,7 @@ def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
                 self.bias = mx.zeros((weight_shape[0],))
 
         def __call__(self, x):
+            """Apply the sole NVFP4 bank entry at every input position."""
             indices = mx.zeros(x.shape[:-1] + (1,), dtype=mx.uint32)
             x = mx.expand_dims(x, (-2, -3))
             x = _nvfp4_qmm(
@@ -309,10 +324,12 @@ def _static_nvfp4_module(weight_shape, scale_shape, bias: bool):
 
 
 def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
+    """Build the temporary in-memory sanitizer for dense and MoE loading."""
     import mlx.core as mx
     from mlx.utils import tree_unflatten
 
     def sanitize(model, weights):
+        """Adapt lazy in-memory weights and modules to the runtime layout."""
         if base_sanitize is not None:
             weights = base_sanitize(model, weights)
         for layer, pool in pools.items():
@@ -396,7 +413,7 @@ def _resident_sanitizer(pools: dict[int, ExpertPool], base_sanitize=None):
 
 
 def load_streaming_model(
-    model_dir: str | Path,
+    index: ModelOptIndex,
     *,
     expert_budget_gib: float = 8.0,
     expert_mode: str = "auto",
@@ -404,7 +421,7 @@ def load_streaming_model(
     trust_remote_code: bool = False,
     expert_stats: bool = False,
 ):
-    """Load resident weights and install direct-from-source expert pools."""
+    """Load common weights and prepare dense or pool-backed MoE inference."""
     import mlx.core as mx
     from mlx_lm import load
     from mlx_lm.models import llama, nemotron_h
@@ -417,10 +434,9 @@ def load_streaming_model(
             "per-expert global_scale argument"
         )
 
-    model_dir = Path(model_dir).resolve()
-    index = ModelOptIndex(model_dir)
+    model_dir = index.model_dir
     model_module = llama if index.model_type == "llama" else nemotron_h
-    summary = index.validate_experts()
+    summary = index.expert_summary
     expert_mode = select_expert_mode(
         expert_mode if index.moe_layers else "resident", index.source_bytes
     )
@@ -476,6 +492,7 @@ def load_streaming_model(
 
 @contextlib.contextmanager
 def streaming_model(*args, **kwargs):
+    """Yield loaded inference resources and always close their expert reader."""
     model, tokenizer, pools, reader = load_streaming_model(*args, **kwargs)
     try:
         yield model, tokenizer, pools, reader
@@ -486,6 +503,7 @@ def streaming_model(*args, **kwargs):
 def aggregate_stats(
     pools: dict[int, ExpertPool], reader: ExpertReader, expert_stats: bool = False
 ) -> dict:
+    """Aggregate cache and reader counters across every MoE layer pool."""
     expert_mode = (
         "resident" if all(pool.fully_resident for pool in pools.values()) else "stream"
     )

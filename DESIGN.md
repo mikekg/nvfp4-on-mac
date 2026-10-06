@@ -24,6 +24,8 @@ those other memory costs.
 Before inference, `ModelOptIndex` reads the checkpoint configuration and
 safetensors headers. It records the file and byte range of every expert tensor
 without loading the tensor data. mlx-lm then loads the common model weights.
+The index validates each layer's expert layout once and records its projection
+formats; loading and computation reuse that metadata.
 
 Each MoE layer receives an `ExpertPool`: a fixed number of memory slots used as
 that layer's expert cache. One slot holds one expert's NVFP4 `up_proj` and

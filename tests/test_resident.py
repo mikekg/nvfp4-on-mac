@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Numerical smoke test for streamed and resident NVFP4 inference."""
+"""Check expert arithmetic, disk loading, eviction, and resident reuse."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from nvfp4_stream.runtime import (
 
 
 def run(device) -> None:
+    """Run numerical and cache-lifecycle smoke checks on one MLX device."""
     mx.set_default_device(device)
     mx.random.seed(0)
     experts, top_k, dims = 4, 2, 32
@@ -88,6 +89,7 @@ def run(device) -> None:
         mx.save_safetensors(str(path / "model-00001-of-00001.safetensors"), source)
 
         index = ModelOptIndex(path)
+        assert index.expert_formats == {0: {"up_proj": "nvfp4", "down_proj": "nvfp4"}}
         reader = ExpertReader(index)
         try:
             stats_pool = ExpertPool(
@@ -195,6 +197,24 @@ def run(device) -> None:
         finally:
             reader.close()
 
+        prefix = "backbone.layers.0.mixer.experts.1.up_proj"
+        for key, replacement in (
+            (f"{prefix}.weight", source[f"{prefix}.weight"].reshape(dims // 2, dims)),
+            (f"{prefix}.weight_scale", None),
+        ):
+            invalid = dict(source)
+            if replacement is None:
+                invalid.pop(key)
+            else:
+                invalid[key] = replacement
+            mx.save_safetensors(str(path / "model-00001-of-00001.safetensors"), invalid)
+            try:
+                ModelOptIndex(path)
+            except ValueError as error:
+                assert "expert tensor layouts differ" in str(error)
+            else:
+                raise AssertionError("invalid expert layout was accepted")
+
         dense_path = Path(tmp) / "dense"
         dense_path.mkdir()
         (dense_path / "config.json").write_text(
@@ -215,7 +235,7 @@ def run(device) -> None:
         dense_index = ModelOptIndex(dense_path)
         assert dense_index.num_layers == 1 and dense_index.moe_layers == ()
         assert dense_index.num_experts == dense_index.top_k == 0
-        assert dense_index.validate_experts()["bytes_per_slot_set"] == 0
+        assert dense_index.expert_summary["bytes_per_slot_set"] == 0
 
         (dense_path / "hf_quant_config.json").write_text(
             json.dumps({"quantization": {"quant_algo": "FP8"}})

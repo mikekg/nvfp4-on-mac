@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run ModelOpt-layout NVFP4 Nemotron-H checkpoints with resident or paged experts."""
+"""Expose checkpoint metadata support for resident or paged inference."""
 
 from .index import ModelOptIndex
 

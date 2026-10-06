@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read safetensors metadata without touching tensor payloads."""
+"""Index checkpoint topology and safetensors without reading tensor payloads."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ NVFP4_SCALE_DENOM = 6.0 * 448.0
 
 @dataclass(frozen=True)
 class TensorLoc:
+    """Locate one tensor payload inside an unchanged safetensors shard."""
     path: str
     start: int
     nbytes: int
@@ -49,7 +50,7 @@ class TensorLoc:
 
 
 class ModelOptIndex:
-    """Byte-range index for an unmodified sharded checkpoint."""
+    """Index byte ranges and routed-expert metadata without reading payloads."""
 
     def __init__(self, model_dir: str | Path):
         self.model_dir = Path(model_dir).resolve()
@@ -119,8 +120,11 @@ class ModelOptIndex:
             int(self.config["n_routed_experts"]) if self.moe_layers else 0
         )
         self.top_k = int(self.config["num_experts_per_tok"]) if self.moe_layers else 0
+        self.expert_formats: dict[int, dict[str, str]] = {}
+        self.expert_summary = self._validate_experts()
 
     def _read_header(self, filename: str) -> None:
+        """Register one shard's absolute tensor ranges from its header."""
         file_size = os.path.getsize(filename)
         with open(filename, "rb") as handle:
             raw = handle.read(8)
@@ -146,15 +150,43 @@ class ModelOptIndex:
 
     @staticmethod
     def expert_prefix(layer: int, expert: int, projection: str) -> str:
+        """Build the checkpoint prefix for one routed expert projection."""
         return f"backbone.layers.{layer}.mixer.experts.{expert}.{projection}"
 
     def expert_parts(
         self, layer: int, expert: int, projection: str
     ) -> dict[str, TensorLoc]:
+        """Return indexed source parts for one routed expert projection."""
         prefix = self.expert_prefix(layer, expert, projection)
-        return {part: self.tensors[f"{prefix}.{part}"] for part in SOURCE_PARTS}
+        return {
+            part: self.tensors[f"{prefix}.{part}"]
+            for part in SOURCE_PARTS
+            if f"{prefix}.{part}" in self.tensors
+        }
+
+    @staticmethod
+    def _expert_format(parts: dict[str, TensorLoc]) -> str:
+        """Validate one projection's stored representation and record its format."""
+        if set(parts) != set(SOURCE_PARTS):
+            raise ValueError("incomplete NVFP4 expert tensor set")
+        weight = parts["weight"]
+        scales = parts["weight_scale"]
+        if weight.dtype != "U8" or len(weight.shape) != 2:
+            raise ValueError(f"{weight.name}: expected a packed U8 matrix")
+        if scales.dtype not in ("F8_E4M3", "F8_E4M3FN", "U8"):
+            raise ValueError(f"{scales.name}: expected E4M3 bytes, got {scales.dtype}")
+        if len(scales.shape) != 2 or weight.shape != (
+            scales.shape[0], scales.shape[1] * 8
+        ):
+            raise ValueError(f"{weight.name}: weight/scale shapes disagree")
+        for part in ("weight_scale_2", "input_scale"):
+            scale = parts[part]
+            if scale.dtype != "F32" or scale.nbytes != 4:
+                raise ValueError(f"{scale.name}: expected one F32 scale")
+        return "nvfp4"
 
     def expert_bytes(self, layer: int) -> int:
+        """Count source bytes for one representative routed expert in a layer."""
         return sum(
             loc.nbytes
             for projection in PROJECTIONS
@@ -162,7 +194,7 @@ class ModelOptIndex:
         )
 
     def expert_slot_bytes(self, layer: int) -> int:
-        """Bytes kept per expert slot; activation scales are shared per projection."""
+        """Count runtime slot bytes for one routed expert in a layer."""
         return sum(
             loc.nbytes
             for projection in PROJECTIONS
@@ -170,38 +202,29 @@ class ModelOptIndex:
             if part != "input_scale"
         )
 
-    def validate_experts(self) -> dict[str, int]:
+    def _validate_experts(self) -> dict[str, int]:
+        """Validate every routed expert and summarize its storage requirements."""
         total = 0
         for layer in self.moe_layers:
-            first_bytes = self.expert_bytes(layer)
-            for expert in range(self.num_experts):
-                size = 0
-                for projection in PROJECTIONS:
-                    parts = self.expert_parts(layer, expert, projection)
-                    weight = parts["weight"]
-                    scales = parts["weight_scale"]
-                    scale2 = parts["weight_scale_2"]
-                    input_scale = parts["input_scale"]
-                    if weight.dtype != "U8":
-                        raise ValueError(f"{weight.name}: expected U8, got {weight.dtype}")
-                    if scales.dtype not in ("F8_E4M3", "F8_E4M3FN", "U8"):
-                        raise ValueError(
-                            f"{scales.name}: expected E4M3 bytes, got {scales.dtype}"
-                        )
-                    if scale2.dtype != "F32" or scale2.nbytes != 4:
-                        raise ValueError(f"{scale2.name}: expected one F32 scale")
-                    if input_scale.dtype != "F32" or input_scale.nbytes != 4:
-                        raise ValueError(
-                            f"{input_scale.name}: expected one F32 input scale"
-                        )
-                    if weight.shape[-1] % 4:
-                        raise ValueError(f"{weight.name}: cannot view last axis as U32")
-                    size += sum(loc.nbytes for loc in parts.values())
-                if size != first_bytes:
-                    raise ValueError(
-                        f"layer {layer} expert {expert}: {size} bytes, expected {first_bytes}"
-                    )
-            total += first_bytes * self.num_experts
+            self.expert_formats[layer] = {}
+            shapes = {}
+            for projection in PROJECTIONS:
+                parts = self.expert_parts(layer, 0, projection)
+                format = self._expert_format(parts)
+                self.expert_formats[layer][projection] = format
+                weight = parts["weight"]
+                shapes[projection] = (weight.shape[0], weight.shape[1] * 2)
+                signature = {part: (loc.dtype, loc.shape) for part, loc in parts.items()}
+                for expert in range(self.num_experts):
+                    prefix = self.expert_prefix(layer, expert, projection)
+                    if f"{prefix}.bias" in self.tensors:
+                        raise ValueError(f"{prefix}: expert bias is unsupported")
+                    other = self.expert_parts(layer, expert, projection)
+                    if {part: (loc.dtype, loc.shape) for part, loc in other.items()} != signature:
+                        raise ValueError(f"{prefix}: expert tensor layouts differ")
+            if shapes["up_proj"] != shapes["down_proj"][::-1]:
+                raise ValueError(f"layer {layer}: expert projection shapes disagree")
+            total += self.expert_bytes(layer) * self.num_experts
         return {
             "layers": len(self.moe_layers),
             "experts_per_layer": self.num_experts,

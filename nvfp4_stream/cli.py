@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command-line entry point."""
+"""Validate, load, generate, and report through the command-line interface."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .runtime import select_expert_mode
 
 
 def _parser() -> argparse.ArgumentParser:
+    """Build the command-line interface for validation and inference."""
     parser = argparse.ArgumentParser(
         description="Run original ModelOpt-layout NVFP4 shards on MLX"
     )
@@ -52,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> None:
+    """Validate, load, and run a local checkpoint through the selected MLX path."""
     args = _parser().parse_args(argv)
     if args.runs < 1:
         raise SystemExit("--runs must be at least 1")
@@ -63,7 +65,7 @@ def main(argv=None) -> None:
 
     try:
         index = ModelOptIndex(model_dir)
-        summary = index.validate_experts()
+        summary = index.expert_summary
     except (FileNotFoundError, KeyError, ValueError) as error:
         raise SystemExit(str(error)) from error
     expert_mode = select_expert_mode(
@@ -109,7 +111,7 @@ def main(argv=None) -> None:
     mx.set_cache_limit(int(args.mlx_cache_gib * (1 << 30)))
     started = time.perf_counter()
     with streaming_model(
-        model_dir,
+        index,
         expert_budget_gib=args.expert_budget_gib,
         expert_mode=expert_mode,
         workers=args.workers,

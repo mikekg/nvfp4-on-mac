@@ -1,7 +1,7 @@
 # Copyright (c) 2026 the nvfp4-stream authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Coalesced pread of individual expert tensors in the ModelOpt layout."""
+"""Read routed expert ranges directly with parallel, coalesced positional I/O."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .index import NVFP4_SCALE_DENOM, PROJECTIONS, ModelOptIndex, TensorLoc
 
 
 class ExpertReader:
+    """Read selected routed-expert ranges from original safetensors shards."""
     def __init__(
         self,
         index: ModelOptIndex,
@@ -33,15 +34,18 @@ class ExpertReader:
         self.reads = 0
 
     def reset_stats(self) -> None:
+        """Clear accumulated physical and useful-byte read counters."""
         self.bytes_read = self.useful_bytes = self.reads = 0
 
     def _fd(self, path: str) -> int:
+        """Lazily open or reuse a read-only descriptor for one shard."""
         with self._fd_lock:
             if path not in self._fds:
                 self._fds[path] = os.open(path, os.O_RDONLY)
             return self._fds[path]
 
     def _plan(self, requests):
+        """Merge nearby same-shard requests into bounded physical read spans."""
         spans = []
         for key, path, start, size in sorted(requests, key=lambda item: item[1:3]):
             if spans:
@@ -64,7 +68,9 @@ class ExpertReader:
         return spans
 
     def _read_ranges(self, requests) -> dict:
+        """Execute planned spans and split their bytes into requested views."""
         def read_span(span):
+            """Read one planned shard span with positional I/O."""
             path, start, size, members = span
             data = os.pread(self._fd(path), size, start)
             if len(data) != size:
@@ -85,21 +91,24 @@ class ExpertReader:
 
     @staticmethod
     def _weight_np(raw: memoryview, loc: TensorLoc) -> np.ndarray:
+        """Expose a routed weight as a NumPy view of its exact stored bits."""
         u8 = np.frombuffer(raw, dtype=np.uint8).reshape(loc.shape)
         return u8.view("<u4").reshape(loc.shape[:-1] + (loc.shape[-1] // 4,))
 
     @staticmethod
     def _scales_np(raw: memoryview, loc: TensorLoc) -> np.ndarray:
+        """Expose an NVFP4 block-scale payload as an unchanged U8 view."""
         return np.frombuffer(raw, dtype=np.uint8).reshape(loc.shape)
 
     @staticmethod
     def _global_scale_value(raw: memoryview, loc: TensorLoc) -> np.float32:
-        # The ModelOpt format stores amax/(6*448). MLX's global_scale argument is amax.
+        """Convert a ModelOpt NVFP4 scalar scale to MLX's amax convention."""
         return np.float32(
             np.frombuffer(raw, dtype="<f4", count=1)[0] * NVFP4_SCALE_DENOM
         )
 
     def read_experts_numpy(self, layer: int, experts: list[int]) -> dict:
+        """Synchronously load selected routed experts into host NumPy mappings."""
         requests = []
         locations = {}
         for expert in experts:
@@ -115,43 +124,49 @@ class ExpertReader:
             output[expert] = {}
             for projection in PROJECTIONS:
                 key = (expert, projection)
-                output[expert][projection] = {
+                parts = {
                     "weight": self._weight_np(
                         raw[key + ("weight",)], locations[key + ("weight",)]
                     ),
-                    "scales": self._scales_np(
+                }
+                parts.update(
+                    scales=self._scales_np(
                         raw[key + ("weight_scale",)],
                         locations[key + ("weight_scale",)],
                     ),
-                    "global_scale": self._global_scale_value(
+                    global_scale=self._global_scale_value(
                         raw[key + ("weight_scale_2",)],
                         locations[key + ("weight_scale_2",)],
                     ),
-                    "input_global_scale": self._global_scale_value(
+                    input_global_scale=self._global_scale_value(
                         raw[key + ("input_scale",)],
                         locations[key + ("input_scale",)],
                     ),
-                }
+                )
+                output[expert][projection] = parts
         return output
 
     def read_experts(self, layer: int, experts: list[int]) -> dict:
+        """Load selected routed experts into their MLX runtime representation."""
         import mlx.core as mx
 
         arrays = self.read_experts_numpy(layer, experts)
-        return {
-            expert: {
-                projection: {
-                    "weight": mx.array(parts["weight"]),
-                    "scales": mx.array(parts["scales"]),
-                    "global_scale": mx.array(parts["global_scale"], mx.float32),
-                    "input_global_scale": parts["input_global_scale"],
-                }
-                for projection, parts in projections.items()
-            }
-            for expert, projections in arrays.items()
-        }
+        output = {}
+        for expert, projections in arrays.items():
+            output[expert] = {}
+            for projection, parts in projections.items():
+                weight = mx.array(parts["weight"])
+                row = {"weight": weight}
+                row.update(
+                    scales=mx.array(parts["scales"]),
+                    global_scale=mx.array(parts["global_scale"], mx.float32),
+                    input_global_scale=parts["input_global_scale"],
+                )
+                output[expert][projection] = row
+        return output
 
     def close(self) -> None:
+        """Wait for range reads, close shard descriptors, and stop workers."""
         self._executor.shutdown(wait=True)
         for fd in self._fds.values():
             os.close(fd)
