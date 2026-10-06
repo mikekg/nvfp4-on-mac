@@ -1,5 +1,6 @@
 # MODEL_ID ?= nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
 # MODEL_ID ?= nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8
+# MODEL_ID ?= Qwen/Qwen2.5-3B-Instruct
 # MODEL_ID ?= nvidia/Llama-3.1-8B-Instruct-NVFP4
 # MODEL_ID ?= nvidia/Llama-3.1-8B-Instruct-FP8
 # MODEL_ID ?= meta-llama/Llama-3.1-8B-Instruct
